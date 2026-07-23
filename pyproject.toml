@@ -1,0 +1,25 @@
+[project]
+name = "unienv_tianji"
+version = "0.0.1a1"
+requires-python = ">= 3.10"
+dependencies = [
+    "unienv",
+    "numpy",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/UniEnvOrg/unienv-tianji"
+Documentation = "https://github.com/UniEnvOrg/unienv-tianji"
+Repository = "https://github.com/UniEnvOrg/unienv-tianji"
+Issues = "https://github.com/UniEnvOrg/unienv-tianji/issues"
+Changelog = "https://github.com/UniEnvOrg/unienv-tianji/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+include = ["*"]
+exclude = ["training*", "tests*"]
+
+[tool.setuptools.package-data]
+"unienv_tianji" = ["sdk/config/*.MvKDCfg"]
