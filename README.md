@@ -75,3 +75,12 @@ actor = TianjiArmActor(
     connect=False,  # skip all hardware I/O; reads return zeros, sends are no-ops
 )
 ```
+## License
+
+This repository is MIT licensed (see [LICENSE](LICENSE)).
+
+The files under `unienv_tianji/sdk/` (`fx_robot.py`, `fx_kine.py`) are vendored
+from [tianji-arm](https://github.com/calvinzqiu/tianji_teleop) and remain
+Apache-2.0 licensed, Copyright 2025 上海孚晞科技有限公司 — see
+[`unienv_tianji/sdk/LICENSE`](unienv_tianji/sdk/LICENSE) and the per-file
+provenance headers.
