@@ -22,4 +22,4 @@ include = ["*"]
 exclude = ["training*", "tests*"]
 
 [tool.setuptools.package-data]
-"unienv_tianji" = ["sdk/config/*.MvKDCfg"]
+"unienv_tianji" = ["sdk/config/*.MvKDCfg", "sdk/*.so", "sdk/*.dll"]

@@ -1,6 +1,6 @@
 # Tianji / Marvin Robot Arm Adaptor
 
-Based on the [tianji_teleop](https://github.com/calvinzqiu/tianji_teleop) `tianji-arm` SDK (Apache-2.0, Copyright 2025 上海孚晞科技有限公司).
+Based on the official [TJ_FX_ROBOT_CONTRL_SDK](https://github.com/cynthia-you/TJ_FX_ROBOT_CONTRL_SDK) `SDK_PYTHON` (Apache-2.0, Copyright 2025 上海孚晞科技有限公司).
 
 ## Installation
 
@@ -18,7 +18,7 @@ The Tianji/Marvin dual-arm robot is controlled over Ethernet through a dedicated
    - `libMarvinSDK.so` (Linux) / `libMarvinSDK.dll` (Windows) — required for any robot communication.
    - `libKine.so` (Linux) / `libKine.dll` (Windows) — only required when forward kinematics (`kine_config_path`) is enabled.
 
-   These binaries are **not** redistributable through this Python package. You must either build them from the upstream `tianji-arm/contrlSDK` and `tianji-arm/kinematicsSDK` sources, or obtain the prebuilt libraries from the vendor (上海孚晞科技有限公司), and place them next to the vendored files:
+   This package **ships the vendor's official prebuilt binaries** — Linux x86_64 `.so` and Windows `.dll` — taken directly from the official [TJ_FX_ROBOT_CONTRL_SDK](https://github.com/cynthia-you/TJ_FX_ROBOT_CONTRL_SDK) repository (`SDK_PYTHON/`), so on those platforms no extra build step is required. Users on other platforms can build the libraries from source using the upstream repo's `marvinSDK_ubuntu.sh` / `marvinSDK_windows.bat` scripts and place the resulting binaries next to the vendored files:
 
    ```
    <site-packages>/unienv_tianji/sdk/libMarvinSDK.so
@@ -79,8 +79,9 @@ actor = TianjiArmActor(
 
 This repository is MIT licensed (see [LICENSE](LICENSE)).
 
-The files under `unienv_tianji/sdk/` (`fx_robot.py`, `fx_kine.py`) are vendored
-from [tianji-arm](https://github.com/calvinzqiu/tianji_teleop) and remain
-Apache-2.0 licensed, Copyright 2025 上海孚晞科技有限公司 — see
-[`unienv_tianji/sdk/LICENSE`](unienv_tianji/sdk/LICENSE) and the per-file
+The files under `unienv_tianji/sdk/` (`fx_robot.py`, `fx_kine.py`, and the
+`libMarvinSDK.*` / `libKine.*` prebuilt binaries) are vendored from the official
+[TJ_FX_ROBOT_CONTRL_SDK](https://github.com/cynthia-you/TJ_FX_ROBOT_CONTRL_SDK)
+repository and remain Apache-2.0 licensed, Copyright 2025 上海孚晞科技有限公司 —
+see [`unienv_tianji/sdk/LICENSE`](unienv_tianji/sdk/LICENSE) and the per-file
 provenance headers.
