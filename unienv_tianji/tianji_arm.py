@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Dict, List, Literal, Optional, Tuple
 
 import numpy as np
@@ -8,7 +9,18 @@ from unienv_interface.backends import ComputeBackend, BArrayType, BDeviceType, B
 from unienv_interface.backends.numpy import NumpyComputeBackend, NumpyArrayType, NumpyDeviceType, NumpyDtypeType, NumpyRNGType
 from unienv_interface.space import DictSpace, BoxSpace
 
-from .sdk import fx_robot, fx_kine
+from .connection import TianjiConnection
+
+# Rest (home) joint positions in radians, based on the MJCF "home" keyframe
+# in UniEnvOrg/genesis_adaptor (unienv_genesis_collection/robots/
+# tianji_marvin_wuji.py: _ARM_HOME_LEFT / _ARM_HOME_RIGHT), with the left-arm
+# j5 sign flipped (+0.356, matching the real left arm's convention).
+# SDK arm "A" is the left arm and arm "B" the right arm. All fingers open.
+REST_JOINT_POSITIONS = {
+    "A": np.array([0.2, -0.963, 0.0, -0.85, 0.356, 0.0, 0.0], dtype=np.float32),
+    "B": np.array([-0.2, -0.963, 0.0, -0.85, -0.356, 0.0, 0.0], dtype=np.float32),
+}
+from .sdk.SDK_PYTHON import fx_kine
 
 
 class TianjiArmActor(WorldNode[
@@ -46,12 +58,27 @@ class TianjiArmActor(WorldNode[
         ip: str = "192.168.1.190",
         arm: Literal["A", "B"] = "A",
         *,
-        vel_ratio: int = 10,
-        acc_ratio: int = 10,
+        vel_ratio: int = 6,  # 6% of 180 deg/s max = 10.8 deg/s ~= 0.188 rad/s
+        acc_ratio: int = 6,
         joint_limit_low_deg: Optional[np.ndarray] = None,
         joint_limit_high_deg: Optional[np.ndarray] = None,
         kine_config_path: Optional[str] = None,
         connect: bool = True,
+        connection: Optional[TianjiConnection] = None,
+        post_enable_settle: float = 1.0,
+        control_mode: str = "position",
+        joint_kd: Tuple[Tuple, Tuple] = (
+            [2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0],  # K, N·m/deg (<=2/joint)
+            [0.6, 0.6, 0.6, 0.4, 0.2, 0.2, 0.2],  # D, N·m/(deg/s) (0..1)
+        ),
+        cart_kd: Tuple[Tuple, Tuple] = (
+            [3000.0, 3000.0, 3000.0, 60.0, 60.0, 60.0, 0.0],  # K: xyz<=3000, rpy<=100, null<=20
+            [0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.0],              # D: ratios 0..1
+        ),
+        tool_mass: float = 1.40,          # kg (wuji hand + mount, tuned on arm A hardware)
+        tool_com: Tuple[float, float, float] = (0.0, 0.0, 80.0),  # mm, flange frame
+        tool_inertia: Tuple[float, float, float, float, float, float] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),  # Ixx,Ixy,Ixz,Iyy,Iyz,Izz
+        set_tool_payload: bool = True,
         control_timestep: Optional[float] = 0.04,  # 25Hz
         update_timestep: Optional[float] = 0.04,  # background read/send frequency
     ):
@@ -62,6 +89,36 @@ class TianjiArmActor(WorldNode[
         self.ip = ip
         self.vel_ratio = vel_ratio
         self.acc_ratio = acc_ratio
+
+        # Control mode: position (rigid following), joint_impedance, or
+        # cart_impedance (both torque mode 3 with an impedance sub-mode).
+        valid_modes = ("position", "joint_impedance", "cart_impedance")
+        if control_mode not in valid_modes:
+            raise ValueError(
+                f"control_mode must be one of {valid_modes}, got {control_mode!r}"
+            )
+        self._control_mode = control_mode
+        self._joint_kd = (
+            [float(x) for x in joint_kd[0]],
+            [float(x) for x in joint_kd[1]],
+        )
+        self._cart_kd = (
+            [float(x) for x in cart_kd[0]],
+            [float(x) for x in cart_kd[1]],
+        )
+        self._tool_mass = float(tool_mass)
+        self._tool_com = (float(tool_com[0]), float(tool_com[1]), float(tool_com[2]))
+        self._tool_inertia = tuple(float(x) for x in tool_inertia)
+        self._set_tool_payload = bool(set_tool_payload)
+        # set_tool kineParams (XYZABC, mm/deg) are zero — TCP = flange.
+        self._tool_kine_params = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        # dynamicParams = [mass, mx, my, mz, Ixx, Ixy, Ixz, Iyy, Iyz, Izz]
+        # (COM in MILLIMETERS, per fx_robot.set_tool docstring).
+        self._tool_dynamic_params = [
+            self._tool_mass,
+            self._tool_com[0], self._tool_com[1], self._tool_com[2],
+            *self._tool_inertia,
+        ]
 
         # Joint limits in degrees -> radians (stored in radians, like RohandActor).
         if joint_limit_low_deg is None:
@@ -86,10 +143,28 @@ class TianjiArmActor(WorldNode[
         self.control_timestep = control_timestep
         self.update_timestep = update_timestep
 
-        # Hardware handles (only created when connect=True).
-        self._robot = None
-        self._dcss = None
-        self._connected = False
+        # Shared hardware connection. The vendored SDK only allows ONE
+        # connection per process (fixed UDP port + shared-memory DCSS), so
+        # dual-arm setups must share a single TianjiConnection. When
+        # connect=False the actor runs fully offline (zero observations,
+        # no-op commands) and the connection is ignored.
+        self.post_enable_settle = post_enable_settle
+        self._connection: Optional[TianjiConnection] = None
+        if connect:
+            if connection is None:
+                raise ValueError(
+                    "TianjiArmActor(connect=True) requires a shared TianjiConnection; "
+                    "create one and pass it as connection=. The vendored SDK only "
+                    "allows one controller connection per process, so dual-arm setups "
+                    "must share a single TianjiConnection."
+                )
+            if not connection.connected:
+                raise ValueError(
+                    "TianjiArmActor(connect=True) was given a TianjiConnection that is "
+                    "not connected. Call connection.connect() first (or construct it "
+                    "with connect=True)."
+                )
+            self._connection = connection
 
         # Optional forward-kinematics support.
         self._kine = None
@@ -156,9 +231,9 @@ class TianjiArmActor(WorldNode[
         self._current_observation: Optional[Dict[str, NumpyArrayType]] = None
         self._next_action: Optional[NumpyArrayType] = None
 
-        # Connect to hardware.
+        # Enable the arm on the shared connection.
         if connect:
-            self._connect_and_enable()
+            self._enable_arm()
 
     # ========== Backend / Device ==========
     @property
@@ -169,34 +244,67 @@ class TianjiArmActor(WorldNode[
     def device(self) -> None:
         return None
 
+    @property
+    def control_mode(self) -> str:
+        """Active control mode (``"position"``, ``"joint_impedance"`` or ``"cart_impedance"``)."""
+        return self._control_mode
+
     # ========== Connection / Lifecycle ==========
-    def _connect_and_enable(self) -> None:
-        """Connect to the controller, clear errors, set vel/acc and enter position mode."""
-        self._robot = fx_robot.Marvin_Robot()
-        self._dcss = fx_robot.DCSS()
-        ok = self._robot.connect(self.ip)
-        if not ok:
-            raise ConnectionError(
-                f"Failed to connect to Tianji/Marvin robot at {self.ip}. "
-                "Ensure the controller is reachable (ping) and the network cable is plugged in."
-            )
-        self._connected = True
-        try:
-            self.clear_errors()
-            self._robot.set_vel_acc(self.arm, self.vel_ratio, self.acc_ratio)
-            self._robot.set_state(self.arm, self.ARM_STATE_POSITION)
-            # Wait (bounded) for the arm to actually reach position-following state.
+    def _enable_arm(self) -> None:
+        """Enable the arm on the shared connection, branching on control_mode.
+
+        Teleop-proven transaction groupings (learned on hardware):
+        ``clear_error`` is ALWAYS alone in its own transaction — bundling it
+        with ``set_state`` can cause the state command to be dropped. The
+        remaining setup is then issued in mode-specific transactions.
+        """
+        assert self._connection is not None
+        mode = self._control_mode
+
+        # txn1: clear_error alone.
+        with self._connection.transaction() as r:
+            r.clear_error(self.arm)
+        time.sleep(0.3)
+
+        if mode == "position":
+            # txn2: vel/acc + state together.
+            with self._connection.transaction() as r:
+                r.set_vel_acc(self.arm, self.vel_ratio, self.acc_ratio)
+                r.set_state(self.arm, self.ARM_STATE_POSITION)
             self._wait_for_state(self.ARM_STATE_POSITION, timeout=5.0, poll_interval=0.01)
-        except Exception:
-            # Best-effort cleanup before propagating the failure.
-            try:
-                self._robot.release_robot()
-            except Exception:
-                pass
-            self._connected = False
-            self._robot = None
-            self._dcss = None
-            raise
+
+        elif mode == "joint_impedance":
+            # txn2: enter torque mode + joint impedance type + vel/acc.
+            with self._connection.transaction() as r:
+                r.set_state(self.arm, self.ARM_STATE_TORQ)
+                r.set_impedance_type(self.arm, 1)
+                r.set_vel_acc(self.arm, self.vel_ratio, self.acc_ratio)
+            # txn3: joint impedance KD gains.
+            with self._connection.transaction() as r:
+                r.set_joint_kd_params(self.arm, list(self._joint_kd[0]), list(self._joint_kd[1]))
+            # txn4 (optional): tool payload dynamics.
+            if self._set_tool_payload:
+                with self._connection.transaction() as r:
+                    r.set_tool(self.arm, list(self._tool_kine_params), list(self._tool_dynamic_params))
+            self._wait_for_state(self.ARM_STATE_TORQ, timeout=5.0, poll_interval=0.01)
+
+        elif mode == "cart_impedance":
+            # txn2: cartesian impedance KD gains (must be set before entering
+            # torque mode so the controller has gains ready).
+            with self._connection.transaction() as r:
+                r.set_cart_kd_params(self.arm, list(self._cart_kd[0]), list(self._cart_kd[1]), 2)
+            # txn3: enter torque mode + cartesian impedance type + vel/acc.
+            with self._connection.transaction() as r:
+                r.set_state(self.arm, self.ARM_STATE_TORQ)
+                r.set_impedance_type(self.arm, 2)
+                r.set_vel_acc(self.arm, self.vel_ratio, self.acc_ratio)
+            # txn4 (optional): tool payload dynamics.
+            if self._set_tool_payload:
+                with self._connection.transaction() as r:
+                    r.set_tool(self.arm, list(self._tool_kine_params), list(self._tool_dynamic_params))
+            self._wait_for_state(self.ARM_STATE_TORQ, timeout=5.0, poll_interval=0.01)
+
+        time.sleep(self.post_enable_settle)
 
     def _wait_for_state(self, target_state: int, timeout: float = 5.0, poll_interval: float = 0.01) -> None:
         import time
@@ -247,29 +355,31 @@ class TianjiArmActor(WorldNode[
         self._next_action = action
 
     def close(self):
-        if not self._connected or self._robot is None:
+        """Disable this arm (best-effort) on the shared connection.
+
+        Does NOT close/release the shared :class:`TianjiConnection` — the user
+        owns it and may share it with other actors. Safe to call when never
+        connected, and robust to a partially-constructed actor (e.g. when the
+        constructor raised before the connection was assigned).
+        """
+        connection = getattr(self, "_connection", None)
+        if connection is None:
             return
         try:
-            self._robot.clear_set()
-            self._robot.set_state(self.arm, self.ARM_STATE_IDLE)
-            self._robot.send_cmd()
+            with connection.transaction() as r:
+                r.set_state(self.arm, self.ARM_STATE_IDLE)
         except Exception:
             pass
-        try:
-            self._robot.release_robot()
-        except Exception:
-            pass
-        self._connected = False
-        self._robot = None
-        self._dcss = None
+        # Drop our reference; the connection itself is owned by the caller.
+        self._connection = None
 
     # ========== Hardware Read Helpers ==========
     def _read_feedback(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
         """Subscribe and return (joint_pos_rad, joint_vel_rad_s, joint_torque_Nm, cur_state, err_code)."""
-        if not self._connected or self._robot is None or self._dcss is None:
+        if self._connection is None:
             zeros = np.zeros(self.n_joints, dtype=np.float32)
             return zeros, zeros, zeros, 0, 0
-        data = self._robot.subscribe(self._dcss)
+        data = self._connection.subscribe()
         i = self.arm_index
         outputs = data["outputs"][i]
         states = data["states"][i]
@@ -285,7 +395,7 @@ class TianjiArmActor(WorldNode[
     def _read_observation(self) -> Dict[str, NumpyArrayType]:
         joint_pos, joint_vel, joint_torque, cur_state, err_code = self._read_feedback()
 
-        if self._connected:
+        if self._connection is not None:
             if cur_state == self.ARM_STATE_ERROR or err_code != 0:
                 raise RuntimeError(
                     f"Tianji arm {self.arm!r} entered an error state (cur_state={cur_state}, err_code={err_code})."
@@ -338,54 +448,130 @@ class TianjiArmActor(WorldNode[
         The command is clipped to the configured joint limits, converted to
         degrees, and submitted as a single clear_set / set_joint_cmd_pose /
         send_cmd transaction. It is a no-op when not connected.
+
+        ``set_joint_cmd_pose`` is documented as valid in BOTH position-follow
+        (state 1) and torque (state 3) modes, so this is the single motion
+        entry point for every control mode.
         """
         positions_rad = np.asarray(positions_rad, dtype=np.float32)
         if positions_rad.shape != (self.n_joints,):
             raise ValueError(f"Expected positions shape ({self.n_joints},), got {positions_rad.shape}")
-        if not self._connected or self._robot is None:
+        if self._connection is None:
             return
         clipped = np.clip(positions_rad, self.joint_limit_low, self.joint_limit_high)
         joints_deg = np.rad2deg(clipped).astype(np.float64).tolist()
-        self._robot.clear_set()
-        self._robot.set_joint_cmd_pose(self.arm, joints_deg)
-        self._robot.send_cmd()
+        with self._connection.transaction() as r:
+            r.set_joint_cmd_pose(self.arm, joints_deg)
+
+    def send_eef_command(self, pose_4x4: np.ndarray) -> None:
+        """
+        Send an end-effector (TCP) pose command by solving IK and issuing the
+        resulting joint targets via :meth:`send_joint_command`.
+
+        The SDK has no streaming cartesian command, so EEF control is
+        implemented as IK -> joint targets. The IK is seeded with the current
+        joint positions (read from feedback, in degrees as the SDK expects) so
+        the solver returns a configuration close to the current one and avoids
+        branch jumps. Works in every control mode (the resulting joint targets
+        are followed rigidly in position mode, or compliantly in impedance
+        modes).
+
+        Parameters
+        ----------
+        pose_4x4:
+            Target 4x4 homogeneous TCP pose (row-major), expressed in the
+            arm's SDK base frame: **x forward, y left, z up, millimeters**
+            (verified on hardware: at the rest pose the left arm's TCP sits
+            at [559.5, +113.4, 252.8] mm, the right arm's mirrored at
+            [559.5, -113.4, 252.8] mm). The pose is the TCP/flange pose *in*
+            base coordinates, not relative to the flange.
+
+        Raises
+        ------
+        ValueError
+            If ``pose_4x4`` is not shape (4, 4).
+        RuntimeError
+            If no kinematics helper is configured (pass
+            ``kine_config_path="default"`` to the constructor), or if IK
+            fails (target unreachable / singular). On IK failure no command is
+            sent.
+        """
+        pose_4x4 = np.asarray(pose_4x4, dtype=np.float64)
+        if pose_4x4.shape != (4, 4):
+            raise ValueError(f"Expected pose shape (4, 4), got {pose_4x4.shape}")
+        if self._kine is None:
+            raise RuntimeError(
+                "send_eef_command requires a kinematics helper; construct the "
+                "actor with kine_config_path='default' (or a custom .MvKDCfg path)."
+            )
+        if self._connection is None:
+            # Offline: consistent with send_joint_command being a no-op.
+            return
+
+        # Seed IK with the current joint configuration (radians -> degrees).
+        joint_pos_rad, _, _, _, _ = self._read_feedback()
+        seed_deg = np.rad2deg(joint_pos_rad).astype(np.float64).tolist()
+
+        sp = fx_kine.FX_InvKineSolvePara()
+        sp.set_input_ik_target_tcp(pose_4x4.flatten().tolist())
+        sp.set_input_ik_ref_joint(seed_deg)
+        sp.set_input_ik_zsp_type(0)  # minimize Euclidean distance to seed
+        result = self._kine.ik(sp)
+        if result is False or result is None:
+            raise RuntimeError(
+                f"Tianji arm {self.arm!r}: IK failed for the requested TCP pose "
+                "(target unreachable or singular); no command was sent."
+            )
+        target_joints_deg = result.m_Output_RetJoint.to_list()
+        target_joints_rad = np.deg2rad(np.asarray(target_joints_deg, dtype=np.float32))
+        self.send_joint_command(target_joints_rad)
+
+    def read_tcp_pose(self) -> np.ndarray:
+        """Current TCP pose as a 4x4 matrix (forward kinematics of current joints).
+
+        Expressed in the arm's SDK base frame: x forward, y left, z up,
+        millimeters. Returns the identity if no kinematics helper is configured.
+        """
+        joint_pos = self.read_joint_positions()
+        return self._compute_tcp_pose(joint_pos)
 
     def get_arm_state(self) -> Tuple[int, int]:
         """Return (cur_state, err_code) for this arm."""
-        if not self._connected or self._robot is None or self._dcss is None:
+        if self._connection is None:
             return 0, 0
-        data = self._robot.subscribe(self._dcss)
+        data = self._connection.subscribe()
         states = data["states"][self.arm_index]
         return int(states["cur_state"]), int(states["err_code"])
 
     def clear_errors(self) -> None:
         """Clear errors on this arm. No-op when not connected."""
-        if not self._connected or self._robot is None:
+        if self._connection is None:
             return
-        self._robot.clear_set()
-        self._robot.clear_error(self.arm)
-        self._robot.send_cmd()
+        with self._connection.transaction() as r:
+            r.clear_error(self.arm)
 
     def set_enabled(self, enabled: bool) -> None:
         """
-        Enable (position mode) or disable (idle) the arm.
+        Enable or disable the arm.
 
-        enabled=True -> set_state(ARM_STATE_POSITION); enabled=False -> set_state(ARM_STATE_IDLE).
-        No-op when not connected.
+        enabled=True re-runs the full :meth:`_enable_arm` sequence so that
+        impedance modes re-apply their KD gains, impedance type and tool
+        payload. enabled=False sets the arm to IDLE. No-op when not connected.
         """
-        if not self._connected or self._robot is None:
+        if self._connection is None:
             return
-        state = self.ARM_STATE_POSITION if enabled else self.ARM_STATE_IDLE
-        self._robot.clear_set()
-        self._robot.set_state(self.arm, state)
-        self._robot.send_cmd()
+        if enabled:
+            self._enable_arm()
+        else:
+            with self._connection.transaction() as r:
+                r.set_state(self.arm, self.ARM_STATE_IDLE)
 
     # ========== Kinematics ==========
     def _init_kine(self, kine_config_path: str) -> None:
         """Lazily initialize the Marvin_Kine forward-kinematics helper."""
         if kine_config_path == "default":
             kine_config_path = os.path.join(
-                os.path.dirname(__file__), "sdk", "config", "ccs_m3.MvKDCfg"
+                os.path.dirname(__file__), "sdk", "ccs_m6_40.MvKDCfg"
             )
         if not os.path.exists(kine_config_path):
             raise FileNotFoundError(f"kine_config_path not found: {kine_config_path}")
