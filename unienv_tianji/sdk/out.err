@@ -1,0 +1,90 @@
+drwxrwxrwt 19 root root 4096 Apr 14 16:41 /var/tmp/
+user platform: linux
+Checking Linux file-based shared memory: /var/tmp/AAA_shm
+Shared memory file /var/tmp/AAA_shm already exists
+  Size: 102400 bytes
+  /var/tmp/ directory permissions:
+Map Master success - m_psm = 0x7fe68aeac008
+[Marvin SDK]: Robot connected  IP=192.168.1.190
+[Marvin SDK]: Clear set
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET0, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET0, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET0, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET0, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET0, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET0, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET0, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET0, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET0, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET0, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: A arm clear error
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET1, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET1, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET1, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET1, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET1, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET1, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET1, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET1, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET1, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set int parameter: RESET1, value=0
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: B arm clear error
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set A arm state=1
+[Marvin SDK]: Set A arm velRatio=5, AccRatio=5 
+[Marvin SDK]: Set B arm state=1
+[Marvin SDK]: Set B arm velRatio=5, AccRatio=5 
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set A arm joint cmd pose, joints=[0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000]
+[Marvin SDK]: Set B arm joint cmd pose, joints=[0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000]
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set A arm joint cmd pose, joints=[18.000000,18.000000,18.000000,18.000000,18.000000,18.000000,18.000000]
+[Marvin SDK]: Set B arm joint cmd pose, joints=[18.000000,18.000000,18.000000,18.000000,18.000000,18.000000,18.000000]
+[Marvin SDK]: OnSetSend
+[Marvin SDK]: Clear set
+[Marvin SDK]: Set A arm joint cmd pose, joints=[0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000]
+[Marvin SDK]: Set B arm joint cmd pose, joints=[0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000]
+[Marvin SDK]: OnSetSend

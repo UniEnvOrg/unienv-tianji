@@ -1,0 +1,156 @@
+<mujoco model="marvin_robot_696_ik">
+  <!-- Additive IK scene for the Marvin Tianji CCS-696 dual 7-DOF arm.
+
+       This file is the SAME arm kinematic tree as
+       sim_infra/assets/robots/tianji_marvin_ccs_696/tianji_marvin_CCS.xml
+       (which already has the corrected joint axes per urdf_conversion_bug.md),
+       with three additions required by the mink-IK pipeline:
+
+         1. `left_wrist` / `right_wrist` EE sites at the tool flange. The site
+            pose matches the one used in the existing sim_infra collision XML
+            (`pos="0 -0.095 0" xyaxes="0 0 1 -1 0 0"` on Link7).
+         2. Per-link collision capsules `{side}_link{i}_col` for i ∈ 1..7,
+            named exactly so sim_infra/grill_sim_infra/teleop/ik_mink.py's
+            `_build_collision_limit` (look up by name at ik_mink.py:115-131)
+            finds them. Sizes copied from
+            DexTele/robots/tianji/tianji_marvin_CCS_real_limit_wuji_sim_infra_col.xml.
+         3. `pillar_geom` for arm-vs-pillar collision avoidance.
+
+       Nothing in the joint/body tree changes — FK against Marvin_Kine.fk()
+       must still agree to sub-mm per scripts/verify_mjcf_vs_sdk.py.
+
+       Meshes live under the sim_infra tree; this file references them via
+       `meshdir` set at load time (see
+       MarvinMinkIK.__init__ in marvin_mink_adapter.py). -->
+
+  <compiler angle="radian" meshdir="../../../../sim_infra/assets/robots/tianji_marvin_ccs_696/meshes/"/>
+
+  <asset>
+    <material name="arm_white" rgba="1 1 1 1"/>
+    <mesh name="BASE_696" content_type="model/stl" file="SRS/BASE_696.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="Base_L" content_type="model/stl" file="left_arm/Base_L.STL"/>
+    <mesh name="Link1_L" content_type="model/stl" file="left_arm/Link1_L.STL"/>
+    <mesh name="Link2_L" content_type="model/stl" file="left_arm/Link2_L.STL"/>
+    <mesh name="Link3_L" content_type="model/stl" file="left_arm/Link3_L.STL"/>
+    <mesh name="Link4_L" content_type="model/stl" file="left_arm/Link4_L.STL"/>
+    <mesh name="Link5_L" content_type="model/stl" file="left_arm/Link5_L.STL"/>
+    <mesh name="Link6_L" content_type="model/stl" file="left_arm/Link6_L.STL"/>
+    <mesh name="Link7_L" content_type="model/stl" file="left_arm/Link7_L.STL"/>
+    <mesh name="Base_R" content_type="model/stl" file="right_arm/Base_R.STL"/>
+    <mesh name="Link1_R" content_type="model/stl" file="right_arm/Link1_R.STL"/>
+    <mesh name="Link2_R" content_type="model/stl" file="right_arm/Link2_R.STL"/>
+    <mesh name="Link3_R" content_type="model/stl" file="right_arm/Link3_R.STL"/>
+    <mesh name="Link4_R" content_type="model/stl" file="right_arm/Link4_R.STL"/>
+    <mesh name="Link5_R" content_type="model/stl" file="right_arm/Link5_R.STL"/>
+    <mesh name="Link6_R" content_type="model/stl" file="right_arm/Link6_R.STL"/>
+    <mesh name="Link7_R" content_type="model/stl" file="right_arm/Link7_R.STL"/>
+  </asset>
+
+  <worldbody>
+    <body name="base">
+      <geom type="mesh" rgba="1 1 1 1" mesh="BASE_696"/>
+      <geom pos="0 0.04 0.14" quat="0.707105 -0.707108 0 0" type="mesh" material="arm_white" mesh="Base_L"/>
+      <geom pos="0 -0.04 0.14" quat="0.707105 0.707108 0 0" type="mesh" material="arm_white" mesh="Base_R"/>
+      <body name="Link1_L" pos="0 0.2145 0.139999" quat="0.707105 -0.707108 0 0">
+        <inertial pos="2.347e-05 0.0055715 -0.03076" quat="0.711599 0.0343691 -0.0341702 0.700912" mass="1.9705" diaginertia="0.00529754 0.00492285 0.00184874"/>
+        <joint name="Joint1_L" pos="0 0 0" axis="0 0 1" range="-2.96706 2.96706" actuatorfrcrange="-108 108"/>
+        <geom type="mesh" material="arm_white" mesh="Link1_L"/>
+        <geom name="left_link1_col" type="capsule" size="0.045 0.06" pos="0 0 0.087" rgba="0 0 0 0" contype="0" conaffinity="0" group="3"/>
+        <body name="Link2_L" quat="0.707105 0.707108 0 0">
+          <inertial pos="0.00013483 0.0617046 0.00950639" quat="0.643375 0.765551 -3.57328e-05 0.000294349" mass="2.24398" diaginertia="0.0119493 0.0112156 0.00338374"/>
+          <joint name="Joint2_L" pos="0 0 0" axis="0 0 1" range="-2.0944 2.0944" actuatorfrcrange="-108 108"/>
+          <geom type="mesh" material="arm_white" mesh="Link2_L"/>
+          <geom name="left_link2_col" type="capsule" size="0.045 0.03" pos="0 0 0" rgba="0 0 0 0" contype="0" conaffinity="0" group="3"/>
+          <body name="Link3_L" pos="0 0.287 0" quat="0.707105 -0.707108 0 0">
+            <inertial pos="0.00968562 0.00246599 -0.046273" quat="0.782446 -0.0355285 -0.0735516 0.617337" mass="1.9242" diaginertia="0.00765215 0.00730789 0.0016338"/>
+            <joint name="Joint3_L" pos="0 0 0" axis="0 0 1" range="-2.96706 2.96706" actuatorfrcrange="-66 66"/>
+            <geom type="mesh" material="arm_white" mesh="Link3_L"/>
+            <geom name="left_link3_col" type="capsule" size="0.04 0.12" pos="0.009 0 0.143" rgba="0 0 0 0" contype="0" conaffinity="0" group="3"/>
+            <body name="Link4_L" pos="0.018 0 0" quat="-2.59734e-06 2.59735e-06 -0.707108 0.707105">
+              <inertial pos="0.00850411 -0.0471822 0.00941509" quat="0.741754 0.628694 0.0774999 -0.220317" mass="1.6085" diaginertia="0.00603244 0.00535875 0.00198228"/>
+              <joint name="Joint4_L" pos="0 0 0" axis="0 0 1" range="-2.5307 1.0472" actuatorfrcrange="-66 66"/>
+              <geom type="mesh" material="arm_white" mesh="Link4_L"/>
+              <geom name="left_link4_col" type="capsule" size="0.04 0.03" pos="0 0 0" rgba="0 0 0 0" contype="0" conaffinity="0" group="3"/>
+              <body name="Link5_L" pos="0.018 -0.314 0" quat="-2.59734e-06 2.59735e-06 -0.707108 0.707105">
+                <inertial pos="0.00051127 0.00101064 -0.112717" quat="0.999438 -0.00995046 -0.00675781 0.0312997" mass="2.0883" diaginertia="0.00626924 0.00564262 0.00243436"/>
+                <joint name="Joint5_L" pos="0 0 0" axis="0 0 1" range="-2.96706 2.96706" actuatorfrcrange="-18 18"/>
+                <geom type="mesh" material="arm_white" mesh="Link5_L"/>
+                <geom name="left_link5_col" type="capsule" size="0.035 0.13" pos="-0.009 0 0.157" rgba="0 0 0 0" contype="0" conaffinity="0" group="3"/>
+                <body name="Link6_L" quat="0.499998 0.5 -0.5 0.500002">
+                  <inertial pos="0.00032659 0.00531336 -0.00030182" quat="0.718188 -0.0225408 0.00407878 0.695472" mass="0.72496" diaginertia="0.000517351 0.000460362 0.000425057"/>
+                  <joint name="Joint6_L" pos="0 0 0" axis="0 0 1" range="-1.0472 1.0472" actuatorfrcrange="-18 18"/>
+                  <geom type="mesh" material="arm_white" mesh="Link6_L"/>
+                  <geom name="left_link6_col" type="capsule" size="0.03 0.02" pos="0 0 0" rgba="0 0 0 0" contype="0" conaffinity="0" group="3"/>
+                  <body name="Link7_L" quat="0.499998 0.5 -0.5 0.500002">
+                    <inertial pos="-9.108e-05 -0.0315325 0.00889371" quat="0.84481 0.535026 0.00229584 -0.00609725" mass="0.68606" diaginertia="0.00173691 0.00153911 0.000745263"/>
+                    <joint name="Joint7_L" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708" actuatorfrcrange="-18 18"/>
+                    <geom type="mesh" material="arm_white" mesh="Link7_L"/>
+                    <geom name="left_link7_col" type="capsule" size="0.03 0.02" pos="0 0 0.04" rgba="0 0 0 0" contype="0" conaffinity="0" group="3"/>
+                    <site name="left_wrist" pos="0 -0.095 0" xyaxes="0 0 1 -1 0 0"/>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="Link1_R" pos="0 -0.2145 0.139999" quat="0.707105 0.707108 0 0">
+        <inertial pos="2.347e-05 0.0055715 -0.03076" quat="0.711599 0.0343691 -0.0341702 0.700912" mass="1.9705" diaginertia="0.00529754 0.00492285 0.00184874"/>
+        <joint name="Joint1_R" pos="0 0 0" axis="0 0 1" range="-2.96706 2.96706" actuatorfrcrange="-108 108"/>
+        <geom type="mesh" material="arm_white" mesh="Link1_R"/>
+        <geom name="right_link1_col" type="capsule" size="0.045 0.06" pos="0 0 0.087" rgba="0 0 0 0" contype="0" conaffinity="0" group="3"/>
+        <body name="Link2_R" quat="0.707105 0.707108 0 0">
+          <inertial pos="0.00013483 0.0617046 0.00950639" quat="0.643375 0.765551 -3.57328e-05 0.000294349" mass="2.24398" diaginertia="0.0119493 0.0112156 0.00338374"/>
+          <joint name="Joint2_R" pos="0 0 0" axis="0 0 1" range="-2.0944 2.0944" actuatorfrcrange="-108 108"/>
+          <geom type="mesh" material="arm_white" mesh="Link2_R"/>
+          <geom name="right_link2_col" type="capsule" size="0.045 0.03" pos="0 0 0" rgba="0 0 0 0" contype="0" conaffinity="0" group="3"/>
+          <body name="Link3_R" pos="0 0.287 0" quat="0.707105 -0.707108 0 0">
+            <inertial pos="0.00968562 0.00246599 -0.046273" quat="0.782446 -0.0355285 -0.0735516 0.617337" mass="1.9242" diaginertia="0.00765215 0.00730789 0.0016338"/>
+            <joint name="Joint3_R" pos="0 0 0" axis="0 0 1" range="-2.96706 2.96706" actuatorfrcrange="-66 66"/>
+            <geom type="mesh" material="arm_white" mesh="Link3_R"/>
+            <geom name="right_link3_col" type="capsule" size="0.04 0.12" pos="0.009 0 0.143" rgba="0 0 0 0" contype="0" conaffinity="0" group="3"/>
+            <body name="Link4_R" pos="0.018 0 0" quat="-2.59734e-06 2.59735e-06 -0.707108 0.707105">
+              <inertial pos="0.00850411 -0.0471822 0.00941509" quat="0.741754 0.628694 0.0774999 -0.220317" mass="1.6085" diaginertia="0.00603244 0.00535875 0.00198228"/>
+              <joint name="Joint4_R" pos="0 0 0" axis="0 0 1" range="-2.5307 1.0472" actuatorfrcrange="-66 66"/>
+              <geom type="mesh" material="arm_white" mesh="Link4_R"/>
+              <geom name="right_link4_col" type="capsule" size="0.04 0.03" pos="0 0 0" rgba="0 0 0 0" contype="0" conaffinity="0" group="3"/>
+              <body name="Link5_R" pos="0.018 -0.314 0" quat="-2.59734e-06 2.59735e-06 -0.707108 0.707105">
+                <inertial pos="-0.00051127 -0.00101064 -0.112717" quat="0.999438 0.00995046 0.00675781 0.0312997" mass="2.0883" diaginertia="0.00626924 0.00564262 0.00243436"/>
+                <joint name="Joint5_R" pos="0 0 0" axis="0 0 1" range="-2.96706 2.96706" actuatorfrcrange="-18 18"/>
+                <geom type="mesh" material="arm_white" mesh="Link5_R"/>
+                <geom name="right_link5_col" type="capsule" size="0.035 0.13" pos="-0.009 0 0.157" rgba="0 0 0 0" contype="0" conaffinity="0" group="3"/>
+                <body name="Link6_R" quat="0.499998 0.5 -0.5 0.500002">
+                  <inertial pos="0.00032659 -0.00531336 0.00030182" quat="0.695472 -0.00407878 0.0225408 0.718188" mass="0.72496" diaginertia="0.000517351 0.000460362 0.000425057"/>
+                  <joint name="Joint6_R" pos="0 0 0" axis="0 0 1" range="-1.0472 1.0472" actuatorfrcrange="-18 18"/>
+                  <geom type="mesh" material="arm_white" mesh="Link6_R"/>
+                  <geom name="right_link6_col" type="capsule" size="0.03 0.02" pos="0 0 0" rgba="0 0 0 0" contype="0" conaffinity="0" group="3"/>
+                  <body name="Link7_R" quat="0.499998 0.5 -0.5 0.500002">
+                    <inertial pos="-9.108e-05 -0.0315325 0.00889371" quat="0.84481 0.535026 0.00229584 -0.00609725" mass="0.68606" diaginertia="0.00173691 0.00153911 0.000745263"/>
+                    <joint name="Joint7_R" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708" actuatorfrcrange="-18 18"/>
+                    <geom type="mesh" material="arm_white" mesh="Link7_R"/>
+                    <geom name="right_link7_col" type="capsule" size="0.03 0.02" pos="0 0 0.04" rgba="0 0 0 0" contype="0" conaffinity="0" group="3"/>
+                    <site name="right_wrist" pos="0 -0.095 0" xyaxes="0 0 1 -1 0 0"/>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <!-- Base-column support. Position copied from the DexTele sim_infra_col
+         scene (the arm mounts on a pillar rising to ~0.435 m). -->
+    <body name="pillar" pos="0 0 0.435">
+      <geom name="pillar_geom" type="box" size="0.1525 0.1525 0.435" rgba="0.4 0.4 0.4 1" contype="0" conaffinity="0" group="0"/>
+    </body>
+  </worldbody>
+
+  <contact>
+    <!-- Same shoulder + wrist contact exclusions as tianji_marvin_CCS.xml. -->
+    <exclude body1="base" body2="Link1_L"/>
+    <exclude body1="base" body2="Link1_R"/>
+    <exclude body1="Link5_L" body2="Link7_L"/>
+    <exclude body1="Link5_R" body2="Link7_R"/>
+  </contact>
+</mujoco>

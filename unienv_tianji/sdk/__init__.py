@@ -1,14 +1,17 @@
-# Vendored Tianji/Marvin robot arm control SDK.
+# Vendored Tianji/Marvin robot arm SDK (1003-generation).
 #
-# This subpackage contains a verbatim copy of the Python SDK from
-# https://github.com/cynthia-you/TJ_FX_ROBOT_CONTRL_SDK (branch: master,
-# subdirectory: SDK_PYTHON, Apache-2.0, Copyright 2025 上海孚晞科技有限公司).
-# It is vendored here so that the unienv_tianji package is self-contained.
+# Verbatim copy of the tianji-arm SDK directory from
+# https://github.com/calvinzqiu/tianji_teleop (subdirectory: tianji-arm,
+# Apache-2.0, Copyright 2025 上海孚晞科技有限公司), itself derived from
+# https://github.com/cynthia-you/TJ_FX_ROBOT_CONTRL_SDK. The original directory
+# structure is preserved: Python bindings live in SDK_PYTHON/ (fx_robot.py,
+# fx_kine.py), native sources in contrlSDK/ and kinematicsSDK/ (built via
+# marvinSDK_ubuntu.sh into SDK_PYTHON/*.so), docs/demos/configs in place.
 #
-# The SDK loads native shared libraries (libMarvinSDK.so / libKine.so on Linux,
-# libMarvinSDK.dll / libKine.dll on Windows) from this same directory (the path
-# is resolved relative to fx_robot.py / fx_kine.py via __file__). The official
-# prebuilt binaries for Linux x86_64 and Windows ship inside this directory and
-# are redistributed under the same Apache-2.0 license. Users on other platforms
-# can build them from the upstream repo's marvinSDK_ubuntu.sh /
-# marvinSDK_windows.bat scripts.
+# We use this 1003-generation SDK (SDK_VERSION 1003 in contrlSDK/Robot.h)
+# instead of the newer contrlSDK100343 because the target controller runs
+# 1003-generation firmware; the 100343 SDK fails its VERSION handshake against
+# it ("control system 0") and gates off all motion commands.
+#
+# Import the bindings as:
+#     from unienv_tianji.sdk.SDK_PYTHON import fx_robot, fx_kine
