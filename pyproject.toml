@@ -5,6 +5,10 @@ requires-python = ">= 3.10"
 dependencies = [
     "unienv",
     "numpy",
+    "mujoco",
+    "mink",
+    "osqp",
+    "xbarray>=0.0.1a19",  # numpy matrix_to_euler_angles fix required (working tree until a19 released)
 ]
 
 [project.optional-dependencies]
@@ -22,4 +26,12 @@ include = ["*"]
 exclude = ["training*", "tests*"]
 
 [tool.setuptools.package-data]
-"unienv_tianji" = ["sdk/config/*.MvKDCfg", "sdk/*.so", "sdk/*.dll"]
+"unienv_tianji" = [
+    "sdk/*.MvKDCfg",
+    "sdk/SDK_PYTHON/*.so",
+    "sdk/SDK_PYTHON/*.dll",
+    "assets/*.xml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

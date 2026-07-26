@@ -7,12 +7,12 @@ the per-arm command calls issued inside ``transaction`` blocks.
 """
 
 from contextlib import contextmanager
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pytest
 
-from unienv_tianji import TianjiArmActor, TianjiConnection
+from unienv_tianji import TianjiArmActor, TianjiConnection, TianjiArmHardwareError
 
 
 class FakeRobot:
@@ -60,6 +60,24 @@ class FakeRobot:
         self._record(("set_tool", arm, list(kineParams), list(dynamicParams)))
 
 
+def _fake_arm_outputs(frame_serial):
+    """A full per-arm RT_OUT feedback dict matching fx_robot.subscribe's output."""
+    return {
+        "frame_serial": frame_serial,
+        "fb_joint_pos": [0.0] * 7,
+        "fb_joint_vel": [0.0] * 7,
+        "fb_joint_posE": [0.0] * 7,
+        "fb_joint_cmd": [0.0] * 7,
+        "fb_joint_cToq": [0.0] * 7,
+        "fb_joint_sToq": [0.0] * 7,
+        "fb_joint_them": [0.0] * 7,
+        "est_joint_firc": [0.0] * 7,
+        "est_joint_firc_dot": [0.0] * 7,
+        "est_joint_force": [0.0] * 7,
+        "est_cart_fn": [0.0] * 6,
+    }
+
+
 class FakeConnection:
     """Stand-in for TianjiConnection used by the actor."""
 
@@ -90,18 +108,8 @@ class FakeConnection:
             states.append({"cur_state": last if last is not None else 1, "err_code": 0})
         return {
             "outputs": [
-                {
-                    "frame_serial": self._frame_serial,
-                    "fb_joint_pos": [0.0] * 7,
-                    "fb_joint_vel": [0.0] * 7,
-                    "fb_joint_sToq": [0.0] * 7,
-                },
-                {
-                    "frame_serial": self._frame_serial,
-                    "fb_joint_pos": [0.0] * 7,
-                    "fb_joint_vel": [0.0] * 7,
-                    "fb_joint_sToq": [0.0] * 7,
-                },
+                _fake_arm_outputs(self._frame_serial),
+                _fake_arm_outputs(self._frame_serial),
             ],
             "states": states,
         }
@@ -379,10 +387,209 @@ def test_send_eef_command_ik_failure_raises_and_sends_nothing():
         conn.close()
 
 
-def test_send_eef_command_without_kine_raises():
+def test_send_eef_command_offline_without_kine_is_noop():
+    # With the offline no-op reorder, send_eef_command(connect=False) returns
+    # early (consistent with send_joint_command being a no-op offline) instead
+    # of raising "requires a kinematics helper".
     actor = TianjiArmActor(connect=False, control_mode="position")
+    try:
+        # No raise, no-op.
+        actor.send_eef_command(np.eye(4, dtype=np.float64))
+    finally:
+        actor.close()
+
+
+def test_send_eef_command_connected_without_kine_raises():
+    conn = FakeConnection()
+    actor = TianjiArmActor(
+        arm="A", connect=True, connection=conn,
+        control_mode="position", post_enable_settle=0.0,
+    )
     try:
         with pytest.raises(RuntimeError, match="requires a kinematics helper"):
             actor.send_eef_command(np.eye(4, dtype=np.float64))
+    finally:
+        actor.close()
+        conn.close()
+
+
+# ========== Hardware-error raising (Part B) ==========
+
+class ErrorFakeConnection(FakeConnection):
+    """FakeConnection whose subscribe() can inject per-arm error state on demand.
+
+    Starts healthy (so the actor's _enable_arm / _wait_for_state completes),
+    then ``inject_error`` flips the per-arm state to the injected values for
+    subsequent subscribe() calls.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._injected: Optional[Dict[str, Tuple[int, int]]] = None
+
+    def inject_error(self, arm_states: Dict[str, Tuple[int, int]]) -> None:
+        self._injected = arm_states
+
+    def subscribe(self) -> Dict:
+        if self._closed:
+            raise RuntimeError("FakeConnection is not connected.")
+        self._frame_serial += 1
+        states = []
+        for arm in ("A", "B"):
+            if self._injected is not None and arm in self._injected:
+                cur, err = self._injected[arm]
+            else:
+                # Healthy: reflect the most recent set_state per arm.
+                last = None
+                for c in self._robot.calls:
+                    if c[0] == "set_state" and c[1] == arm:
+                        last = c[2]
+                cur, err = (last if last is not None else 1), 0
+            states.append({"cur_state": cur, "err_code": err})
+        return {
+            "outputs": [
+                _fake_arm_outputs(self._frame_serial),
+                _fake_arm_outputs(self._frame_serial),
+            ],
+            "states": states,
+        }
+
+
+def test_error_code_nonzero_raises_on_feedback_refresh():
+    conn = ErrorFakeConnection()
+    actor = TianjiArmActor(
+        arm="A", connect=True, connection=conn, post_enable_settle=0.0,
+    )
+    try:
+        # Enable completed healthy; now inject an error code for arm A.
+        conn.inject_error({"A": (TianjiArmActor.ARM_STATE_POSITION, 42)})
+        with pytest.raises(TianjiArmHardwareError) as excinfo:
+            actor.post_environment_step(0.04)
+        assert excinfo.value.arm == "A"
+        assert excinfo.value.error_code == 42
+    finally:
+        actor.close()
+        conn.close()
+
+
+def test_error_state_100_raises_on_feedback_refresh():
+    conn = ErrorFakeConnection()
+    actor = TianjiArmActor(
+        arm="A", connect=True, connection=conn, post_enable_settle=0.0,
+    )
+    try:
+        conn.inject_error({"A": (TianjiArmActor.ARM_STATE_ERROR, 0)})
+        with pytest.raises(TianjiArmHardwareError) as excinfo:
+            actor.post_environment_step(0.04)
+        assert excinfo.value.cur_state == TianjiArmActor.ARM_STATE_ERROR
+    finally:
+        actor.close()
+        conn.close()
+
+
+def test_normal_state_no_error_does_not_raise():
+    conn = ErrorFakeConnection()
+    actor = TianjiArmActor(
+        arm="A", connect=True, connection=conn, post_enable_settle=0.0,
+    )
+    try:
+        # Healthy (no injection): post-step must not raise.
+        actor.post_environment_step(0.04)
+        obs = actor.get_observation()
+        assert obs is not None
+        assert "joint_positions" in obs
+        assert "arm_state" not in obs
+        assert "error_code" not in obs
+    finally:
+        actor.close()
+        conn.close()
+
+
+# ========== Extended proprioception channels ==========
+
+EXTENDED_KEYS = {
+    "joint_currents",
+    "joint_temperatures",
+    "joint_friction_estimates",
+    "joint_external_force_estimates",
+    "cartesian_force_estimate",
+}
+
+
+def test_extended_proprioception_keys_present_by_default():
+    actor = TianjiArmActor(connect=False)
+    try:
+        keys = set(actor.observation_space.spaces.keys())
+        # Basic trio always present.
+        assert {"joint_positions", "joint_velocities", "joint_torques"} <= keys
+        # Extended channels on by default.
+        assert EXTENDED_KEYS <= keys
+        # Shapes.
+        assert actor.observation_space.spaces["joint_currents"].shape == (7,)
+        assert actor.observation_space.spaces["joint_temperatures"].shape == (7,)
+        assert actor.observation_space.spaces["joint_friction_estimates"].shape == (7,)
+        assert actor.observation_space.spaces["joint_external_force_estimates"].shape == (7,)
+        assert actor.observation_space.spaces["cartesian_force_estimate"].shape == (6,)
+    finally:
+        actor.close()
+
+
+def test_extended_proprioception_offline_zeros():
+    actor = TianjiArmActor(connect=False)
+    try:
+        actor.after_reset()
+        obs = actor.get_observation()
+        for k in EXTENDED_KEYS:
+            assert k in obs, f"missing {k}"
+            assert obs[k] is not None
+            np.testing.assert_array_equal(obs[k], 0.0)
+        # cartesian_force_estimate is (6,), the rest (7,).
+        assert obs["cartesian_force_estimate"].shape == (6,)
+        for k in EXTENDED_KEYS - {"cartesian_force_estimate"}:
+            assert obs[k].shape == (7,)
+    finally:
+        actor.close()
+
+
+def test_extended_proprioception_flows_through_connected_fake():
+    conn = ErrorFakeConnection()
+    actor = TianjiArmActor(
+        arm="A", connect=True, connection=conn, post_enable_settle=0.0,
+    )
+    try:
+        actor.post_environment_step(0.04)
+        obs = actor.get_observation()
+        for k in EXTENDED_KEYS:
+            assert k in obs
+            assert obs[k] is not None
+    finally:
+        actor.close()
+        conn.close()
+
+
+def test_extended_proprioception_disabled_hides_keys():
+    actor = TianjiArmActor(connect=False, read_extended_proprioception=False)
+    try:
+        keys = set(actor.observation_space.spaces.keys())
+        assert {"joint_positions", "joint_velocities", "joint_torques"} <= keys
+        for k in EXTENDED_KEYS:
+            assert k not in keys
+        actor.after_reset()
+        obs = actor.get_observation()
+        for k in EXTENDED_KEYS:
+            assert k not in obs
+    finally:
+        actor.close()
+
+
+def test_offline_never_raises():
+    actor = TianjiArmActor(connect=False)
+    try:
+        actor.after_reset()
+        obs = actor.get_observation()
+        assert obs is not None
+        actor.post_environment_step(0.04)
+        obs2 = actor.get_observation()
+        assert obs2 is not None
     finally:
         actor.close()

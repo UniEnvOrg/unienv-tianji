@@ -1,6 +1,6 @@
 import os
 import time
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 
@@ -10,6 +10,7 @@ from unienv_interface.backends.numpy import NumpyComputeBackend, NumpyArrayType,
 from unienv_interface.space import DictSpace, BoxSpace
 
 from .connection import TianjiConnection
+from .errors import TianjiArmHardwareError
 
 # Rest (home) joint positions in radians, based on the MJCF "home" keyframe
 # in UniEnvOrg/genesis_adaptor (unienv_genesis_collection/robots/
@@ -81,6 +82,7 @@ class TianjiArmActor(WorldNode[
         set_tool_payload: bool = True,
         control_timestep: Optional[float] = 0.04,  # 25Hz
         update_timestep: Optional[float] = 0.04,  # background read/send frequency
+        read_extended_proprioception: bool = True,
     ):
         if arm not in ("A", "B"):
             raise ValueError(f"arm must be 'A' or 'B', got {arm!r}")
@@ -110,6 +112,13 @@ class TianjiArmActor(WorldNode[
         self._tool_com = (float(tool_com[0]), float(tool_com[1]), float(tool_com[2]))
         self._tool_inertia = tuple(float(x) for x in tool_inertia)
         self._set_tool_payload = bool(set_tool_payload)
+        # Extended proprioception channels (joint currents, temperatures,
+        # commanded positions, friction/disturbance estimates, cartesian
+        # force estimate) all ride in the SAME regular 1kHz feedback frame
+        # (RT_OUT / DCSS subscribe), so they are safe to read every step with
+        # no extra blocking/vendor calls. Set False to expose only the basic
+        # joint position/velocity/torque trio (matching the pre-extension API).
+        self.read_extended_proprioception = bool(read_extended_proprioception)
         # set_tool kineParams (XYZABC, mm/deg) are zero — TCP = flange.
         self._tool_kine_params = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         # dynamicParams = [mass, mx, my, mz, Ixx, Ixy, Ixz, Iyy, Iyz, Izz]
@@ -189,28 +198,44 @@ class TianjiArmActor(WorldNode[
                 dtype=np.float32,
                 shape=(self.n_joints,),
             ),
-            "joint_torques": BoxSpace(  # N·m, sensor torque
+            "joint_torques": BoxSpace(  # N·m, sensor torque (m_FB_Joint_SToq)
                 NumpyComputeBackend,
                 low=-100.0,
                 high=100.0,
                 dtype=np.float32,
                 shape=(self.n_joints,),
             ),
-            "arm_state": BoxSpace(  # cur_state (0..255)
-                NumpyComputeBackend,
-                low=0.0,
-                high=255.0,
-                dtype=np.float32,
-                shape=(1,),
-            ),
-            "error_code": BoxSpace(  # err_code (0..2**31)
-                NumpyComputeBackend,
-                low=0.0,
-                high=float(2 ** 31),
-                dtype=np.float32,
-                shape=(1,),
-            ),
         }
+        if self.read_extended_proprioception:
+            # All of these ride in the regular 1kHz RT_OUT feedback frame (no
+            # extra blocking/vendor calls per step). Units from the SDK
+            # collect_data ID table (python_doc_contrl.md §3.1) and the RT_OUT
+            # struct comments in fx_robot.py.
+            obs_spaces["joint_currents"] = BoxSpace(  # motor current, per-mille (0/00) of rated
+                NumpyComputeBackend,
+                low=-1000.0, high=1000.0,
+                dtype=np.float32, shape=(self.n_joints,),
+            )
+            obs_spaces["joint_temperatures"] = BoxSpace(  # °C, drive/motor temp
+                NumpyComputeBackend,
+                low=-40.0, high=150.0,
+                dtype=np.float32, shape=(self.n_joints,),
+            )
+            obs_spaces["joint_friction_estimates"] = BoxSpace(  # N·m, m_EST_Joint_Firc
+                NumpyComputeBackend,
+                low=-100.0, high=100.0,
+                dtype=np.float32, shape=(self.n_joints,),
+            )
+            obs_spaces["joint_external_force_estimates"] = BoxSpace(  # N·m, m_EST_Joint_Force
+                NumpyComputeBackend,
+                low=-100.0, high=100.0,
+                dtype=np.float32, shape=(self.n_joints,),
+            )
+            obs_spaces["cartesian_force_estimate"] = BoxSpace(  # N/N·m, m_EST_Cart_FN (6D)
+                NumpyComputeBackend,
+                low=-200.0, high=200.0,
+                dtype=np.float32, shape=(6,),
+            )
         if self._kine is not None:
             obs_spaces["tcp_pose"] = BoxSpace(  # 4x4 FK pose matrix
                 NumpyComputeBackend,
@@ -374,43 +399,86 @@ class TianjiArmActor(WorldNode[
         self._connection = None
 
     # ========== Hardware Read Helpers ==========
-    def _read_feedback(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
-        """Subscribe and return (joint_pos_rad, joint_vel_rad_s, joint_torque_Nm, cur_state, err_code)."""
+    def _read_feedback(self) -> Dict[str, Any]:
+        """Subscribe and return the full per-arm feedback frame.
+
+        Returns a dict with the following keys (all numpy float32 unless noted):
+
+        Basic (always read):
+            joint_positions     (7,) rad           — m_FB_Joint_Pos (deg → rad)
+            joint_velocities    (7,) rad/s         — m_FB_Joint_Vel (deg/s → rad/s)
+            joint_torques       (7,) N·m            — m_FB_Joint_SToq (sensor torque)
+            cur_state           int                — m_CurState
+            err_code            int                — m_ERRCode
+
+        Extended (always read from the same RT_OUT frame; exposed as obs only
+        when ``read_extended_proprioception`` is True):
+            joint_currents      (7,) per-mille     — m_FB_Joint_CToq (motor current, 0/00 of rated)
+            joint_temperatures  (7,) °C             — m_FB_Joint_Them
+            joint_friction_estimates (7,) N·m       — m_EST_Joint_Firc
+            joint_external_force_estimates (7,) N·m — m_EST_Joint_Force
+            cartesian_force_estimate (6,) N/N·m    — m_EST_Cart_FN (6D end-effector force estimate)
+
+        Offline (no connection): all numeric channels are zeros, cur_state=0,
+        err_code=0.
+        """
+        z7 = np.zeros(self.n_joints, dtype=np.float32)
+        z6 = np.zeros(6, dtype=np.float32)
         if self._connection is None:
-            zeros = np.zeros(self.n_joints, dtype=np.float32)
-            return zeros, zeros, zeros, 0, 0
+            return {
+                "joint_positions": z7,
+                "joint_velocities": z7,
+                "joint_torques": z7,
+                "joint_currents": z7,
+                "joint_temperatures": z7,
+                "joint_friction_estimates": z7,
+                "joint_external_force_estimates": z7,
+                "cartesian_force_estimate": z6,
+                "cur_state": 0,
+                "err_code": 0,
+            }
         data = self._connection.subscribe()
         i = self.arm_index
         outputs = data["outputs"][i]
         states = data["states"][i]
         pos_deg = np.asarray(outputs["fb_joint_pos"], dtype=np.float32)
         vel_deg_s = np.asarray(outputs["fb_joint_vel"], dtype=np.float32)
-        stoq = np.asarray(outputs["fb_joint_sToq"], dtype=np.float32)
-        joint_pos = np.deg2rad(pos_deg).astype(np.float32)
-        joint_vel = np.deg2rad(vel_deg_s).astype(np.float32)
-        cur_state = int(states["cur_state"])
-        err_code = int(states["err_code"])
-        return joint_pos, joint_vel, stoq, cur_state, err_code
+        return {
+            "joint_positions": np.deg2rad(pos_deg).astype(np.float32),
+            "joint_velocities": np.deg2rad(vel_deg_s).astype(np.float32),
+            "joint_torques": np.asarray(outputs["fb_joint_sToq"], dtype=np.float32),
+            "joint_currents": np.asarray(outputs["fb_joint_cToq"], dtype=np.float32),
+            "joint_temperatures": np.asarray(outputs["fb_joint_them"], dtype=np.float32),
+            "joint_friction_estimates": np.asarray(outputs["est_joint_firc"], dtype=np.float32),
+            "joint_external_force_estimates": np.asarray(outputs["est_joint_force"], dtype=np.float32),
+            "cartesian_force_estimate": np.asarray(outputs["est_cart_fn"], dtype=np.float32),
+            "cur_state": int(states["cur_state"]),
+            "err_code": int(states["err_code"]),
+        }
 
     def _read_observation(self) -> Dict[str, NumpyArrayType]:
-        joint_pos, joint_vel, joint_torque, cur_state, err_code = self._read_feedback()
+        fb = self._read_feedback()
 
         if self._connection is not None:
-            if cur_state == self.ARM_STATE_ERROR or err_code != 0:
-                raise RuntimeError(
-                    f"Tianji arm {self.arm!r} entered an error state (cur_state={cur_state}, err_code={err_code})."
+            if fb["cur_state"] == self.ARM_STATE_ERROR or fb["err_code"] != 0:
+                raise TianjiArmHardwareError(
+                    self.arm, cur_state=fb["cur_state"], error_code=fb["err_code"],
                 )
 
         obs: Dict[str, NumpyArrayType] = {
-            "joint_positions": joint_pos.astype(np.float32),
-            "joint_velocities": joint_vel.astype(np.float32),
-            "joint_torques": joint_torque.astype(np.float32),
-            "arm_state": np.asarray([cur_state], dtype=np.float32),
-            "error_code": np.asarray([err_code], dtype=np.float32),
+            "joint_positions": fb["joint_positions"].astype(np.float32),
+            "joint_velocities": fb["joint_velocities"].astype(np.float32),
+            "joint_torques": fb["joint_torques"].astype(np.float32),
         }
+        if self.read_extended_proprioception:
+            obs["joint_currents"] = fb["joint_currents"].astype(np.float32)
+            obs["joint_temperatures"] = fb["joint_temperatures"].astype(np.float32)
+            obs["joint_friction_estimates"] = fb["joint_friction_estimates"].astype(np.float32)
+            obs["joint_external_force_estimates"] = fb["joint_external_force_estimates"].astype(np.float32)
+            obs["cartesian_force_estimate"] = fb["cartesian_force_estimate"].astype(np.float32)
 
         if self._kine is not None:
-            obs["tcp_pose"] = self._compute_tcp_pose(joint_pos).astype(np.float32)
+            obs["tcp_pose"] = self._compute_tcp_pose(fb["joint_positions"]).astype(np.float32)
 
         return obs
 
@@ -428,18 +496,51 @@ class TianjiArmActor(WorldNode[
     # ========== Public Helper Methods ==========
     def read_joint_positions(self) -> np.ndarray:
         """Current joint positions in radians (shape (7,))."""
-        joint_pos, _, _, _, _ = self._read_feedback()
-        return joint_pos
+        return self._read_feedback()["joint_positions"]
 
     def read_joint_velocities(self) -> np.ndarray:
         """Current joint velocities in rad/s (shape (7,))."""
-        _, joint_vel, _, _, _ = self._read_feedback()
-        return joint_vel
+        return self._read_feedback()["joint_velocities"]
 
     def read_joint_torques(self) -> np.ndarray:
         """Current joint sensor torques in N·m (shape (7,))."""
-        _, _, joint_torque, _, _ = self._read_feedback()
-        return joint_torque
+        return self._read_feedback()["joint_torques"]
+
+    def read_joint_currents(self) -> np.ndarray:
+        """Current motor currents in per-mille of rated (shape (7,)).
+
+        From ``m_FB_Joint_CToq`` in the regular feedback frame.
+        """
+        return self._read_feedback()["joint_currents"]
+
+    def read_joint_temperatures(self) -> np.ndarray:
+        """Current joint/drive temperatures in °C (shape (7,)).
+
+        From ``m_FB_Joint_Them`` in the regular feedback frame.
+        """
+        return self._read_feedback()["joint_temperatures"]
+
+    def read_joint_friction_estimates(self) -> np.ndarray:
+        """Joint friction estimates in N·m (shape (7,)).
+
+        From ``m_EST_Joint_Firc`` in the regular feedback frame.
+        """
+        return self._read_feedback()["joint_friction_estimates"]
+
+    def read_joint_external_force_estimates(self) -> np.ndarray:
+        """Joint external-force estimates in N·m (shape (7,)).
+
+        From ``m_EST_Joint_Force`` in the regular feedback frame.
+        """
+        return self._read_feedback()["joint_external_force_estimates"]
+
+    def read_cartesian_force_estimate(self) -> np.ndarray:
+        """End-effector cartesian force estimate (6D: Fx,Fy,Fz,Tx,Ty,Tz).
+
+        Units N / N·m, shape (6,). From ``m_EST_Cart_FN`` in the regular
+        feedback frame.
+        """
+        return self._read_feedback()["cartesian_force_estimate"]
 
     def send_joint_command(self, positions_rad: np.ndarray) -> None:
         """
@@ -499,17 +600,17 @@ class TianjiArmActor(WorldNode[
         pose_4x4 = np.asarray(pose_4x4, dtype=np.float64)
         if pose_4x4.shape != (4, 4):
             raise ValueError(f"Expected pose shape (4, 4), got {pose_4x4.shape}")
+        if self._connection is None:
+            # Offline: consistent with send_joint_command being a no-op.
+            return
         if self._kine is None:
             raise RuntimeError(
                 "send_eef_command requires a kinematics helper; construct the "
                 "actor with kine_config_path='default' (or a custom .MvKDCfg path)."
             )
-        if self._connection is None:
-            # Offline: consistent with send_joint_command being a no-op.
-            return
 
         # Seed IK with the current joint configuration (radians -> degrees).
-        joint_pos_rad, _, _, _, _ = self._read_feedback()
+        joint_pos_rad = self._read_feedback()["joint_positions"]
         seed_deg = np.rad2deg(joint_pos_rad).astype(np.float64).tolist()
 
         sp = fx_kine.FX_InvKineSolvePara()
@@ -530,8 +631,13 @@ class TianjiArmActor(WorldNode[
         """Current TCP pose as a 4x4 matrix (forward kinematics of current joints).
 
         Expressed in the arm's SDK base frame: x forward, y left, z up,
-        millimeters. Returns the identity if no kinematics helper is configured.
+        millimeters. Returns the identity when offline (no connection) or
+        when no kinematics helper is configured.
         """
+        if self._connection is None:
+            # Offline: no feedback to read and no FK source, mirror
+            # _compute_tcp_pose's no-kine fallback to a 4x4 identity.
+            return np.eye(4, dtype=np.float32)
         joint_pos = self.read_joint_positions()
         return self._compute_tcp_pose(joint_pos)
 

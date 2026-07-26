@@ -1,0 +1,58 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mujoco model="tianji_A_arm_kine">
+  <compiler angle="radian" coordinate="local" />
+  <option integrator="implicitfast" cone="elliptic" impratio="10" />
+  <default>
+    <default class="tianji_arm">
+      <joint damping="0.21" armature="0.195" frictionloss="1.137" />
+    </default>
+    <default class="tianji_wrist5">
+      <joint damping="0.21" armature="0.074" frictionloss="0.763" />
+    </default>
+    <default class="tianji_wrist6">
+      <joint damping="0.21" armature="0.074" frictionloss="0.44" />
+    </default>
+    <default class="tianji_wrist7">
+      <joint damping="0.21" armature="0.074" frictionloss="0.248" />
+    </default>
+  </default>
+  <worldbody>
+    <body name="base">
+      <body name="Link1_L" pos="0 0.2145 0.139999" quat="0.707105 -0.707108 0 0">
+        <inertial pos="2.347e-05 0.0055715 -0.03076" quat="0.711599 0.0343691 -0.0341702 0.700912" mass="1.9705" diaginertia="0.00529754 0.00492285 0.00184874" />
+        <joint class="tianji_arm" name="Joint1_L" pos="0 0 0" axis="0 0 1" range="-2.96706 2.96706" actuatorfrcrange="-108 108" />
+        <body name="Link2_L" quat="0.707105 0.707108 0 0">
+          <inertial pos="0.00013483 0.0617046 0.00950639" quat="0.643375 0.765551 -3.57328e-05 0.000294349" mass="2.24398" diaginertia="0.0119493 0.0112156 0.00338374" />
+          <joint class="tianji_arm" name="Joint2_L" pos="0 0 0" axis="0 0 1" range="-2.0944 2.0944" actuatorfrcrange="-108 108" />
+          <body name="Link3_L" pos="0 0.287 0" quat="0.707105 -0.707108 0 0">
+            <inertial pos="0.00968562 0.00246599 -0.046273" quat="0.782446 -0.0355285 -0.0735516 0.617337" mass="1.9242" diaginertia="0.00765215 0.00730789 0.0016338" />
+            <joint class="tianji_arm" name="Joint3_L" pos="0 0 0" axis="0 0 1" range="-2.96706 2.96706" actuatorfrcrange="-66 66" />
+            <body name="Link4_L" pos="0.018 0 0" quat="-2.59734e-06 2.59735e-06 -0.707108 0.707105">
+              <inertial pos="0.00850411 -0.0471822 0.00941509" quat="0.741754 0.628694 0.0774999 -0.220317" mass="1.6085" diaginertia="0.00603244 0.00535875 0.00198228" />
+              <joint class="tianji_arm" name="Joint4_L" pos="0 0 0" axis="0 0 1" range="-2.5307 1.0472" actuatorfrcrange="-66 66" />
+              <body name="Link5_L" pos="0.018 -0.314 0" quat="-2.59734e-06 2.59735e-06 -0.707108 0.707105">
+                <inertial pos="0.00051127 0.00101064 -0.112717" quat="0.999438 -0.00995046 -0.00675781 0.0312997" mass="2.0883" diaginertia="0.00626924 0.00564262 0.00243436" />
+                <joint class="tianji_wrist5" name="Joint5_L" pos="0 0 0" axis="0 0 1" range="-2.96706 2.96706" actuatorfrcrange="-18 18" />
+                <body name="Link6_L" quat="0.499998 0.5 -0.5 0.500002">
+                  <inertial pos="0.00032659 0.00531336 -0.00030182" quat="0.718188 -0.0225408 0.00407878 0.695472" mass="0.72496" diaginertia="0.000517351 0.000460362 0.000425057" />
+                  <joint class="tianji_wrist6" name="Joint6_L" pos="0 0 0" axis="0 0 1" range="-1.0472 1.0472" actuatorfrcrange="-18 18" />
+                  <body name="Link7_L" quat="0.499998 0.5 -0.5 0.500002">
+                    <inertial pos="-9.108e-05 -0.0315325 0.00889371" quat="0.84481 0.535026 0.00229584 -0.00609725" mass="0.68606" diaginertia="0.00173691 0.00153911 0.000745263" />
+                    <joint class="tianji_wrist7" name="Joint7_L" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708" actuatorfrcrange="-18 18" />
+                    <body name="left_wuji_palm" pos="0 -0.09 0" xyaxes="-0.707107 0 0.707107 -0.707107 0 -0.707107">
+                      <inertial pos="0 0 0" mass="1e-6" diaginertia="1e-9 1e-9 1e-9" />
+                      <site name="palm" pos="0 0 0" xyaxes="1 0 0 0 1 0" />
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <keyframe>
+    <key name="home" qpos="0.200000 -0.963000 0.000000 -0.850000 0.356000 0.000000 0.000000" />
+  </keyframe>
+</mujoco>
