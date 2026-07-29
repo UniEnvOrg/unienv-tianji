@@ -60,11 +60,11 @@ class FakeRobot:
         self._record(("set_tool", arm, list(kineParams), list(dynamicParams)))
 
 
-def _fake_arm_outputs(frame_serial):
+def _fake_arm_outputs(frame_serial, fb_joint_pos=None):
     """A full per-arm RT_OUT feedback dict matching fx_robot.subscribe's output."""
     return {
         "frame_serial": frame_serial,
-        "fb_joint_pos": [0.0] * 7,
+        "fb_joint_pos": fb_joint_pos if fb_joint_pos is not None else [10.0] + [0.0] * 6,
         "fb_joint_vel": [0.0] * 7,
         "fb_joint_posE": [0.0] * 7,
         "fb_joint_cmd": [0.0] * 7,
@@ -81,10 +81,23 @@ def _fake_arm_outputs(frame_serial):
 class FakeConnection:
     """Stand-in for TianjiConnection used by the actor."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        staged_application: bool = False,
+        mismatch: Optional[str] = None,
+        feedback_error_code: int = 0,
+        feedback_positions: Optional[List[List[float]]] = None,
+    ):
         self._robot = FakeRobot()
         self._closed = False
         self._frame_serial = 0
+        self.subscribe_count = 0
+        self._staged_application = staged_application
+        self._mismatch = mismatch
+        self._feedback_error_code = feedback_error_code
+        self._feedback_positions = feedback_positions
+        self._post_config_subscribe_count = 0
         self.transaction_count = 0
         # Per-transaction call lists, in issue order. transactions[i] is the
         # list of robot calls made inside the i-th transaction block.
@@ -97,22 +110,85 @@ class FakeConnection:
     def subscribe(self) -> Dict:
         if self._closed:
             raise RuntimeError("FakeConnection is not connected.")
+        self.subscribe_count += 1
+        configured = any(c[0] == "set_impedance_type" for c in self._robot.calls)
+        if configured:
+            self._post_config_subscribe_count += 1
         self._frame_serial += 1
+        if self._feedback_positions is None:
+            fb_joint_pos = [10.0] + [0.0] * 6
+        else:
+            fb_joint_pos = self._feedback_positions[
+                min(self.subscribe_count - 1, len(self._feedback_positions) - 1)
+            ]
         # Reflect the most recent set_state per arm so _wait_for_state completes.
         states = []
+        inputs = []
         for arm in ("A", "B"):
             last = None
+            imp_type = 0
+            joint_k = [0.0] * 7
+            joint_d = [0.0] * 7
+            cart_k = [0.0] * 7
+            cart_d = [0.0] * 7
             for c in self._robot.calls:
                 if c[0] == "set_state" and c[1] == arm:
                     last = c[2]
+                elif c[0] == "set_impedance_type" and c[1] == arm:
+                    imp_type = c[2]
+                elif c[0] == "set_joint_kd_params" and c[1] == arm:
+                    joint_k, joint_d = c[2], c[3]
+                elif c[0] == "set_cart_kd_params" and c[1] == arm:
+                    cart_k, cart_d = c[2], c[3]
+            if self._staged_application and self._post_config_subscribe_count == 1:
+                imp_type = 0
+                joint_k = [0.0] * 7
+                joint_d = [0.0] * 7
+                cart_k = [0.0] * 7
+                cart_d = [0.0] * 7
+            elif self._staged_application and self._post_config_subscribe_count == 2:
+                joint_k = [0.0] * 7
+                joint_d = [0.0] * 7
+                cart_k = [0.0] * 7
+                cart_d = [0.0] * 7
             states.append({"cur_state": last if last is not None else 1, "err_code": 0})
-        return {
+            inputs.append({
+                "imp_type": imp_type,
+                "joint_k": joint_k,
+                "joint_d": joint_d,
+                "cart_k": cart_k[:6],
+                "cart_d": cart_d[:6],
+                "cart_kn": cart_k[6],
+                "cart_dn": cart_d[6],
+            })
+        data = {
             "outputs": [
-                _fake_arm_outputs(self._frame_serial),
-                _fake_arm_outputs(self._frame_serial),
+                _fake_arm_outputs(self._frame_serial, fb_joint_pos),
+                _fake_arm_outputs(self._frame_serial, fb_joint_pos),
             ],
             "states": states,
+            "inputs": inputs,
         }
+        if (
+            self._mismatch is not None
+            and configured
+            # Let _wait_for_state see one healthy post-config frame first.
+            and self._post_config_subscribe_count > 1
+        ):
+            if self._mismatch == "state":
+                data["states"][0]["cur_state"] = TianjiArmActor.ARM_STATE_POSITION
+            elif self._mismatch == "type":
+                data["inputs"][0]["imp_type"] = (
+                    2 if data["inputs"][0]["imp_type"] == 1 else 1
+                )
+            elif self._mismatch == "gains":
+                if data["inputs"][0]["imp_type"] == 1:
+                    data["inputs"][0]["joint_k"][0] = 0.0
+                else:
+                    data["inputs"][0]["cart_k"][0] = 0.0
+        if configured and self._feedback_error_code and self._post_config_subscribe_count > 1:
+            data["states"][0]["err_code"] = self._feedback_error_code
+        return data
 
     @contextmanager
     def transaction(self):
@@ -253,6 +329,8 @@ def test_joint_impedance_enable_order_and_params():
         assert any(c[0] == "set_impedance_type" and c[2] == 1 for c in a_calls)
         assert any(c[0] == "set_joint_kd_params" for c in a_calls)
         assert any(c[0] == "set_tool" for c in a_calls)
+        # State-wait read plus impedance verification read.
+        assert conn.subscribe_count >= 2
 
         # Transaction ORDER: clear_error appears in an earlier transaction than set_state(3).
         clear_idx = conn.txn_index_of(lambda c: c[0] == "clear_error", arm="A")
@@ -268,6 +346,99 @@ def test_joint_impedance_enable_order_and_params():
     finally:
         actor.close()
         conn.close()
+
+
+@pytest.mark.parametrize("control_mode", ["joint_impedance", "cart_impedance"])
+def test_impedance_waits_for_staged_controller_values(control_mode):
+    # The controller first reports state, then impedance type, then gains. The
+    # verifier must keep polling until the complete configuration is visible.
+    conn = FakeConnection(staged_application=True)
+    actor = TianjiArmActor(
+        arm="A", connect=True, connection=conn,
+        control_mode=control_mode, post_enable_settle=0.0,
+    )
+    try:
+        assert conn._post_config_subscribe_count >= 3
+    finally:
+        actor.close()
+        conn.close()
+
+
+def test_joint_impedance_partial_feedback_timeout_reports_last_values():
+    conn = FakeConnection(mismatch="gains")
+    with pytest.raises(TianjiArmHardwareError, match="impedance verification failed") as excinfo:
+        TianjiArmActor(
+            arm="A", connect=True, connection=conn,
+            control_mode="joint_impedance", post_enable_settle=0.0,
+        )
+    assert "last observed" in str(excinfo.value)
+    conn.close()
+
+
+def test_constructor_enable_failure_returns_arm_to_idle():
+    conn = FakeConnection(mismatch="gains")
+    with pytest.raises(TianjiArmHardwareError, match="impedance verification failed"):
+        TianjiArmActor(
+            arm="A", connect=True, connection=conn,
+            control_mode="joint_impedance", post_enable_settle=0.0,
+        )
+    assert any(
+        c == ("set_state", "A", TianjiArmActor.ARM_STATE_IDLE)
+        for c in conn.calls_for("A")
+    )
+    conn.close()
+
+
+def test_reenable_failure_returns_arm_to_idle():
+    conn = FakeConnection()
+    actor = TianjiArmActor(
+        arm="A", connect=True, connection=conn,
+        control_mode="joint_impedance", post_enable_settle=0.0,
+    )
+    try:
+        idle_calls_before = len([
+            c for c in conn.calls_for("A")
+            if c == ("set_state", "A", TianjiArmActor.ARM_STATE_IDLE)
+        ])
+        conn._mismatch = "gains"
+        with pytest.raises(TianjiArmHardwareError, match="impedance verification failed"):
+            actor.set_enabled(True)
+        idle_calls_after = len([
+            c for c in conn.calls_for("A")
+            if c == ("set_state", "A", TianjiArmActor.ARM_STATE_IDLE)
+        ])
+        assert idle_calls_after == idle_calls_before + 1
+    finally:
+        actor.close()
+        conn.close()
+
+
+@pytest.mark.parametrize("control_mode", ["joint_impedance", "cart_impedance"])
+@pytest.mark.parametrize("mismatch", ["state", "type", "gains"])
+def test_impedance_feedback_mismatch_raises_at_deadline(control_mode, mismatch):
+    conn = FakeConnection(mismatch=mismatch)
+    with pytest.raises(TianjiArmHardwareError, match="impedance verification failed") as excinfo:
+        TianjiArmActor(
+            arm="A", connect=True, connection=conn,
+            control_mode=control_mode, post_enable_settle=0.0,
+        )
+    # The state-wait frame is healthy; later partial values persist. Reaching
+    # several polls proves mismatch is held to the verification deadline.
+    assert conn._post_config_subscribe_count > 3
+    assert "last observed" in str(excinfo.value)
+    conn.close()
+
+
+@pytest.mark.parametrize("control_mode", ["joint_impedance", "cart_impedance"])
+def test_impedance_feedback_error_blocks_success(control_mode):
+    conn = FakeConnection(feedback_error_code=42)
+    with pytest.raises(TianjiArmHardwareError, match="err_code=42") as excinfo:
+        TianjiArmActor(
+            arm="A", connect=True, connection=conn,
+            control_mode=control_mode, post_enable_settle=0.0,
+        )
+    assert excinfo.value.error_code == 42
+    conn.close()
 
 
 def test_cart_impedance_enable_kd_before_state():
@@ -311,6 +482,92 @@ def test_position_mode_no_impedance_or_tool_calls():
         assert not any(c[0] == "set_tool" for c in a_calls)
         # Still enters position state.
         assert any(c[0] == "set_state" and c[2] == TianjiArmActor.ARM_STATE_POSITION for c in a_calls)
+        assert conn.subscribe_count == 6  # state wait + five valid feedback frames
+    finally:
+        actor.close()
+        conn.close()
+
+
+def test_enable_waits_for_consecutive_valid_joint_feedback():
+    zero = [0.0] * 7
+    valid = [10.0] + [0.0] * 6
+    # The first zero frame is consumed by _wait_for_state; the gate then sees
+    # two zero frames before its required two consecutive valid frames.
+    conn = FakeConnection(feedback_positions=[zero, zero, zero, valid, valid])
+    actor = TianjiArmActor(
+        arm="A", connect=True, connection=conn, post_enable_settle=0.0,
+        feedback_valid_frames=2,
+    )
+    try:
+        assert conn.subscribe_count == 5
+    finally:
+        actor.close()
+        conn.close()
+
+
+def test_valid_feedback_counter_resets_after_invalid_frame():
+    valid = [10.0] + [0.0] * 6
+    invalid = [0.0] * 7
+    conn = FakeConnection()
+    actor = TianjiArmActor(
+        arm="A", connect=True, connection=conn, post_enable_settle=0.0,
+        feedback_valid_frames=3,
+    )
+    try:
+        conn._feedback_positions = [valid, valid, invalid, valid, valid, valid]
+        conn.subscribe_count = 0
+        actor._wait_for_valid_feedback()
+        # The first two valid frames cannot count across the invalid frame.
+        assert conn.subscribe_count == 6
+    finally:
+        actor.close()
+        conn.close()
+
+
+def test_valid_feedback_counter_reset_times_out_without_enough_new_frames():
+    valid = [10.0] + [0.0] * 6
+    invalid = [0.0] * 7
+    conn = FakeConnection()
+    actor = TianjiArmActor(
+        arm="A", connect=True, connection=conn, post_enable_settle=0.0,
+        feedback_valid_frames=3,
+    )
+    try:
+        conn._feedback_positions = [valid, valid, invalid, valid, valid]
+        conn.subscribe_count = 0
+        actor.feedback_valid_timeout = 0.1
+        with pytest.raises(TianjiArmHardwareError, match="timed out waiting for valid joint feedback"):
+            actor._wait_for_valid_feedback()
+        assert conn.subscribe_count == 5
+    finally:
+        actor.close()
+        conn.close()
+
+
+def test_enable_rejects_persistently_zero_joint_feedback_and_idles():
+    conn = FakeConnection(feedback_positions=[[0.0] * 7])
+    with pytest.raises(TianjiArmHardwareError, match="timed out waiting for valid joint feedback") as excinfo:
+        TianjiArmActor(
+            arm="A", connect=True, connection=conn, post_enable_settle=0.0,
+            feedback_valid_frames=1, feedback_valid_timeout=0.0,
+        )
+    assert "fb_joint_pos=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]" in str(excinfo.value)
+    assert any(
+        c == ("set_state", "A", TianjiArmActor.ARM_STATE_IDLE)
+        for c in conn.calls_for("A")
+    )
+    conn.close()
+
+
+def test_enable_valid_feedback_from_first_gate_frame_has_no_poll_delay():
+    conn = FakeConnection()
+    actor = TianjiArmActor(
+        arm="A", connect=True, connection=conn, post_enable_settle=0.0,
+        feedback_valid_frames=1,
+    )
+    try:
+        # One state-wait poll plus one immediately-successful validity poll.
+        assert conn.subscribe_count == 2
     finally:
         actor.close()
         conn.close()

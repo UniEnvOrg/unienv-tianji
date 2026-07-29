@@ -1,7 +1,7 @@
 from .connection import TianjiConnection
 from .tianji_arm import TianjiArmActor, REST_JOINT_POSITIONS
 from .errors import TianjiArmHardwareError
-from .eef_node import TianjiArmEefActor
+from .eef_node import TianjiArmEefActor, rest_eef_pose
 
 __all__ = [
     "TianjiConnection",
@@ -9,4 +9,5 @@ __all__ = [
     "REST_JOINT_POSITIONS",
     "TianjiArmHardwareError",
     "TianjiArmEefActor",
+    "rest_eef_pose",
 ]

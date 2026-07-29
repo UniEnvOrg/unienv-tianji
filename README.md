@@ -175,6 +175,10 @@ the feedback channel at every refresh (``post_environment_step`` /
 :class:`TianjiArmHardwareError` (a ``RuntimeError`` subclass carrying the arm
 id, ``cur_state`` and ``err_code``). State 0/idle is **not** an error.
 
+Idle (state 0) is safe to leave the arm in: the brakes engage and the arm
+**locks at its current joint positions** — verified on hardware that there is
+no gravity sag when torque is disengaged.
+
 Recover with :meth:`TianjiArmActor.clear_errors`, then re-enable the arm:
 
 ```python
@@ -270,20 +274,18 @@ Action / observation spaces:
 
 ### Velocity limits
 
-`TianjiArmEefActor` defaults to a node-side `max_joint_pos_vel=0.2` rad/s,
-matching the sim's `tianji_marvin_wuji` limit. When it constructs its internal
-`TianjiArmActor`, the vendor `vel_ratio` and `acc_ratio` default to `10`
-(about 18 deg/s or 0.31 rad/s), leaving headroom so the node-side clip is the
-binding motion contract and the firmware cap only guards against abuse.
+The real arm path has no node-side per-step target clip. Velocity limiting is
+governed solely by the SDK's `vel_ratio` and `acc_ratio`, which default to `10`
+(about 18 deg/s or 0.31 rad/s) when `TianjiArmEefActor` constructs its internal
+`TianjiArmActor`.
 
-Override both layers through the EEF actor constructor, for example:
+Override the SDK limits through the EEF actor constructor, for example:
 
 ```python
 actor = TianjiArmEefActor(
     world,
     arm="A",
     connection=connection,
-    max_joint_pos_vel=0.15,  # rad/s; use None to disable the node-side clip
     vel_ratio=12,            # forwarded to the internally constructed child
     acc_ratio=12,
 )

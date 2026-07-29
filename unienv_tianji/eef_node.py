@@ -13,6 +13,7 @@ expressed directly in the robot base frame, which is the MJCF robot-root frame.
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from typing import Any, Dict, Literal, Optional, Tuple
 
 import numpy as np
@@ -133,6 +134,30 @@ _ARM_XML = {
 _PALM_SITE = "palm"
 
 
+@lru_cache(maxsize=None)
+def _rest_eef_pose_cached(arm: Literal["A", "B"]) -> tuple[np.ndarray, np.ndarray]:
+    """Compute the canonical home palm pose from the per-arm kinematics MJCF."""
+    import mujoco
+
+    xml_path = os.path.join(_ASSET_DIR, _ARM_XML[arm])
+    model = mujoco.MjModel.from_xml_path(xml_path)
+    data = mujoco.MjData(model)
+    data.qpos[:] = REST_JOINT_POSITIONS[arm]
+    mujoco.mj_forward(model, data)
+    site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, _PALM_SITE)
+    if site_id < 0:
+        raise RuntimeError(f"Kinematics MJCF {xml_path} has no {_PALM_SITE!r} site")
+    position = data.site_xpos[site_id].copy()
+    rotation = data.site_xmat[site_id].reshape(3, 3).copy()
+    return position, matrix_to_quaternion(rotation)
+
+
+def rest_eef_pose(arm: Literal["A", "B"]) -> tuple[np.ndarray, np.ndarray]:
+    """Return canonical home palm position and wxyz quaternion for one arm."""
+    position, quaternion = _rest_eef_pose_cached(arm)
+    return position.copy(), quaternion.copy()
+
+
 class TianjiArmEefActor(WorldNode[
     None, Dict[str, NumpyArrayType], NumpyArrayType,
     NumpyArrayType, NumpyDeviceType, NumpyDtypeType, NumpyRNGType
@@ -206,13 +231,13 @@ class TianjiArmEefActor(WorldNode[
         position_cost: float = 1.0,
         orientation_cost: float = 1.0,
         lm_damping: float = 0.0,
-        # Aligned with the sim default in genesis_adaptor's
-        # tianji_marvin_wuji MAX_JOINT_POS_VEL.
-        max_joint_pos_vel: Optional[float] = 0.2,
         control_timestep: Optional[float] = 0.04,
         update_timestep: Optional[float] = 0.04,
         **arm_actor_kwargs: Any,
     ):
+        # ``close`` may be called by WorldNode.__del__ if construction fails.
+        self.arm_actor: Optional[TianjiArmActor] = None
+        self._owns_arm_actor = False
         if arm not in ("A", "B"):
             raise ValueError(f"arm must be 'A' or 'B', got {arm!r}")
         if action_mode not in ("eef_pose", "joint_position"):
@@ -238,12 +263,6 @@ class TianjiArmEefActor(WorldNode[
         self.position_cost = float(position_cost)
         self.orientation_cost = float(orientation_cost)
         self.lm_damping = float(lm_damping)
-        # Per-step joint-position delta cap in rad/s: the per-step |dq| is
-        # clipped to ``max_joint_pos_vel * dt`` using the actual lifecycle dt
-        # (mirroring the sim's JointPositionController max_joint_pos_vel*dt).
-        self.max_joint_pos_vel = (
-            None if max_joint_pos_vel is None else float(max_joint_pos_vel)
-        )
 
         # WorldNode bookkeeping.
         self.name = name
@@ -258,10 +277,8 @@ class TianjiArmEefActor(WorldNode[
         # Child actor (owned if we constructed it).
         self._owns_arm_actor = arm_actor is None
         if arm_actor is None:
-            # The node-side 0.2 rad/s clip is the motion contract. Keep the
-            # vendor firmware cap above it (10% of 180 deg/s ~= 0.31 rad/s,
-            # about 1.5x headroom) so it only guards against abuse rather than
-            # becoming the binding limit. Explicit caller overrides win.
+            # The SDK's velocity and acceleration ratios are the only real-arm
+            # velocity limit. Explicit caller overrides win.
             arm_actor_kwargs.setdefault("vel_ratio", 10)
             arm_actor_kwargs.setdefault("acc_ratio", 10)
             arm_actor = TianjiArmActor(
@@ -459,32 +476,13 @@ class TianjiArmEefActor(WorldNode[
                 break
         return q.astype(np.float64), err.astype(np.float64)
 
-    def _clip_joint_delta(
-        self, q_target: np.ndarray, q_current: np.ndarray, dt: float
-    ) -> np.ndarray:
-        """Apply an optional per-step |dq| cap (rad), mirroring sim max_joint_pos_vel.
-
-        ``max_joint_pos_vel`` is in rad/s; the per-step delta is clipped to
-        ``max_joint_pos_vel * dt`` using the actual lifecycle ``dt`` passed to
-        ``pre_environment_step`` / ``apply_action`` (mirroring the sim's
-        ``JointPositionController`` which clips to ``max_joint_pos_vel * dt``).
-        """
-        if self.max_joint_pos_vel is None or dt is None or dt <= 0:
-            return q_target
-        limit = float(self.max_joint_pos_vel) * float(dt)
-        dq = q_target - q_current
-        np.clip(dq, -limit, limit, out=dq)
-        return q_current + dq
-
     # ========== Action resolution (shared by pre_environment_step / apply_action) ==========
-    def _resolve_eef_action(
-        self, action: np.ndarray, dt: Optional[float]
-    ) -> None:
+    def _resolve_eef_action(self, action: np.ndarray) -> None:
         """Resolve an eef_pose action into a joint command and send it.
 
         Parses position + rotation, solves IK seeded from the child's current
-        feedback joints, applies the ``max_joint_pos_vel*dt`` cap, updates
-        ``_last_ik_error``, and dispatches through ``child.send_joint_command``.
+        feedback joints, updates ``_last_ik_error``, and dispatches through
+        ``child.send_joint_command``.
         Does NOT touch the cached ``_next_action`` state.
         """
         action = np.asarray(action, dtype=np.float64)
@@ -506,10 +504,6 @@ class TianjiArmEefActor(WorldNode[
         q_target, err = self._solve_ik(T_root, q_current)
         self._last_ik_error = err.astype(np.float32)
 
-        # Optional per-step velocity cap (rad/s * dt -> rad).
-        eff_dt = dt if dt is not None else self._ik_dt
-        q_target = self._clip_joint_delta(q_target, q_current, eff_dt)
-
         # Send to child (never set_next_action — stale-resend hazard).
         self.arm_actor.send_joint_command(q_target.astype(np.float32))
 
@@ -522,9 +516,8 @@ class TianjiArmEefActor(WorldNode[
         ``tianji_sim_real`` calls this directly.
 
         - eef mode: parse per ``rotation_representation`` (+ normalize), solve
-          IK seeded from current feedback joints, apply the
-          ``max_joint_pos_vel*dt`` cap, update ``_last_ik_error``, and send via
-          ``child.send_joint_command``.
+          IK seeded from current feedback joints, update ``_last_ik_error``, and
+          send via ``child.send_joint_command``.
         - joint mode: ``child.send_joint_command(action)`` directly.
 
         Parameters
@@ -533,9 +526,7 @@ class TianjiArmEefActor(WorldNode[
             Action vector matching the configured action space. For eef mode
             this is ``[pos(3), rot(rot_dim)]``; for joint mode ``q_target(7)``.
         dt:
-            Control timestep (s) used for the ``max_joint_pos_vel*dt`` rate
-            limit. When ``None``, falls back to the node's ``control_timestep``
-            (or 0.04 if unset).
+            Reserved for lifecycle compatibility and ignored.
         """
         action = np.asarray(action, dtype=np.float32)
         if self.action_mode == "joint_position":
@@ -549,7 +540,7 @@ class TianjiArmEefActor(WorldNode[
                 f"(action_mode={self.action_mode!r}, "
                 f"rotation_representation={self.rotation_representation!r})"
             )
-        self._resolve_eef_action(action.astype(np.float64), dt)
+        self._resolve_eef_action(action.astype(np.float64))
 
     # ========== WorldNode lifecycle ==========
     def pre_environment_step(self, dt: float, *, priority: int = 0) -> None:
@@ -562,7 +553,7 @@ class TianjiArmEefActor(WorldNode[
             # No IK was run, so the last-error stays as-is (zeros before first
             # eef action; the joint path never updates it).
             return
-        self._resolve_eef_action(np.asarray(action, dtype=np.float64), dt)
+        self._resolve_eef_action(np.asarray(action, dtype=np.float64))
 
     def post_environment_step(self, dt: float, *, priority: int = 0) -> None:
         self._current_observation = self._read_observation()
@@ -608,8 +599,10 @@ class TianjiArmEefActor(WorldNode[
         Never closes the shared :class:`TianjiConnection` (the caller owns it),
         consistent with :class:`TianjiArmActor`.
         """
-        if self._owns_arm_actor:
-            self.arm_actor.close()
+        if getattr(self, "_owns_arm_actor", False):
+            arm_actor = getattr(self, "arm_actor", None)
+            if arm_actor is not None:
+                arm_actor.close()
 
     # ========== Observation ==========
     def _read_observation(self) -> Dict[str, NumpyArrayType]:

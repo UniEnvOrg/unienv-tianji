@@ -12,7 +12,6 @@ All tests run with ``connect=False`` (no hardware). They cover:
   hold-pose regression test on both arms;
 * lifecycle: reset/reload priority sets declared, reset clears the IK error
   cache + cached action (env end-to-end);
-* max_joint_pos_vel dt-aware rate limit (rad/s * dt);
 * the pinned synchronous no-cache apply_action action path.
 """
 
@@ -43,6 +42,12 @@ ASSET_DIR = os.path.join(
     os.path.dirname(__file__), "..", "unienv_tianji", "assets"
 )
 ASSET_DIR = os.path.abspath(ASSET_DIR)
+
+
+def test_partial_construction_close_is_safe():
+    """WorldNode cleanup must not mask an inner arm-actor init failure."""
+    node = TianjiArmEefActor.__new__(TianjiArmEefActor)
+    node.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -652,77 +657,30 @@ def test_env_reset_clears_ik_error():
 
 
 # --------------------------------------------------------------------------- #
-# max_joint_pos_vel: dt-aware rate limit (rad/s * dt)
+# SDK velocity and acceleration settings
 # --------------------------------------------------------------------------- #
 
-def test_eef_actor_velocity_defaults():
+def test_eef_actor_sdk_velocity_defaults():
     node = TianjiArmEefActor(connect=False, arm="A")
     try:
-        assert node.max_joint_pos_vel == pytest.approx(0.2)
         assert node.arm_actor.vel_ratio == 10
         assert node.arm_actor.acc_ratio == 10
     finally:
         node.close()
 
 
-def test_eef_actor_velocity_overrides_respected():
+def test_eef_actor_sdk_velocity_overrides_respected():
     node = TianjiArmEefActor(
         connect=False,
         arm="A",
-        max_joint_pos_vel=0.35,
         vel_ratio=14,
         acc_ratio=15,
     )
     try:
-        assert node.max_joint_pos_vel == pytest.approx(0.35)
         assert node.arm_actor.vel_ratio == 14
         assert node.arm_actor.acc_ratio == 15
     finally:
         node.close()
-
-
-def test_max_joint_pos_vel_dt_aware_clip():
-    """The per-step |dq| cap is max_joint_pos_vel * dt (not a raw delta)."""
-    node = TianjiArmEefActor(
-        connect=False, arm="A",
-        max_joint_pos_vel=1.0,  # 1 rad/s
-    )
-    try:
-        q_current = np.zeros(7, dtype=np.float64)
-        q_target = np.full(7, 10.0, dtype=np.float64)  # huge delta
-        # dt=0.04 -> cap 0.04 rad per step.
-        clipped = node._clip_joint_delta(q_target, q_current, dt=0.04)
-        np.testing.assert_allclose(
-            np.abs(clipped - q_current), 0.04, atol=1e-9
-        )
-        # dt=0.1 -> cap 0.1 rad per step.
-        clipped2 = node._clip_joint_delta(q_target, q_current, dt=0.1)
-        np.testing.assert_allclose(
-            np.abs(clipped2 - q_current), 0.1, atol=1e-9
-        )
-    finally:
-        node.close()
-
-
-def test_max_joint_pos_vel_none_no_clip():
-    node = TianjiArmEefActor(connect=False, arm="A", max_joint_pos_vel=None)
-    try:
-        q_current = np.zeros(7, dtype=np.float64)
-        q_target = np.full(7, 10.0, dtype=np.float64)
-        out = node._clip_joint_delta(q_target, q_current, dt=0.04)
-        np.testing.assert_array_equal(out, q_target)
-    finally:
-        node.close()
-
-
-def test_max_joint_vel_param_removed():
-    """The old max_joint_vel parameter must no longer exist."""
-    import inspect
-
-    sig = inspect.signature(TianjiArmEefActor.__init__)
-    assert "max_joint_pos_vel" in sig.parameters
-    assert "max_joint_vel" not in sig.parameters
-
 
 # --------------------------------------------------------------------------- #
 # apply_action: pinned, synchronous, no-cache action path

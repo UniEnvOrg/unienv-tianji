@@ -45,7 +45,9 @@ class TianjiArmActor(WorldNode[
     n_joints = len(joint_names)
 
     # Arm state codes (see fx_robot.Marvin_Robot.set_state docstring).
-    ARM_STATE_IDLE = 0          # 下伺服 / disabled
+    ARM_STATE_IDLE = 0          # 下伺服 / disabled — brakes engage and the arm
+                                # LOCKS at its current joint positions (verified
+                                # on hardware: no gravity sag on disable)
     ARM_STATE_POSITION = 1      # 位置跟随 / position following
     ARM_STATE_PVT = 2           # PVT
     ARM_STATE_TORQ = 3          # 扭矩 / torque
@@ -67,6 +69,9 @@ class TianjiArmActor(WorldNode[
         connect: bool = True,
         connection: Optional[TianjiConnection] = None,
         post_enable_settle: float = 1.0,
+        feedback_valid_tol_deg: float = 0.25,
+        feedback_valid_frames: int = 5,
+        feedback_valid_timeout: float = 10.0,
         control_mode: str = "position",
         joint_kd: Tuple[Tuple, Tuple] = (
             [2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0],  # K, N·m/deg (<=2/joint)
@@ -158,6 +163,9 @@ class TianjiArmActor(WorldNode[
         # connect=False the actor runs fully offline (zero observations,
         # no-op commands) and the connection is ignored.
         self.post_enable_settle = post_enable_settle
+        self.feedback_valid_tol_deg = feedback_valid_tol_deg
+        self.feedback_valid_frames = feedback_valid_frames
+        self.feedback_valid_timeout = feedback_valid_timeout
         self._connection: Optional[TianjiConnection] = None
         if connect:
             if connection is None:
@@ -258,7 +266,7 @@ class TianjiArmActor(WorldNode[
 
         # Enable the arm on the shared connection.
         if connect:
-            self._enable_arm()
+            self._enable_arm_with_idle_on_failure()
 
     # ========== Backend / Device ==========
     @property
@@ -275,6 +283,27 @@ class TianjiArmActor(WorldNode[
         return self._control_mode
 
     # ========== Connection / Lifecycle ==========
+    def _enable_arm_with_idle_on_failure(self) -> None:
+        """Enable the arm, returning it to IDLE if setup fails at any point."""
+        try:
+            self._enable_arm()
+        except BaseException:
+            # Never leave hardware in torque mode because setup verification or
+            # another enable step failed. Cleanup must not mask the root cause.
+            self._best_effort_set_idle()
+            raise
+
+    def _best_effort_set_idle(self) -> None:
+        """Try to disable the arm without masking an existing failure."""
+        connection = self._connection
+        if connection is None:
+            return
+        try:
+            with connection.transaction() as r:
+                r.set_state(self.arm, self.ARM_STATE_IDLE)
+        except BaseException:
+            pass
+
     def _enable_arm(self) -> None:
         """Enable the arm on the shared connection, branching on control_mode.
 
@@ -312,6 +341,7 @@ class TianjiArmActor(WorldNode[
                 with self._connection.transaction() as r:
                     r.set_tool(self.arm, list(self._tool_kine_params), list(self._tool_dynamic_params))
             self._wait_for_state(self.ARM_STATE_TORQ, timeout=5.0, poll_interval=0.01)
+            self._verify_impedance_feedback(1, self._joint_kd, "joint")
 
         elif mode == "cart_impedance":
             # txn2: cartesian impedance KD gains (must be set before entering
@@ -328,8 +358,126 @@ class TianjiArmActor(WorldNode[
                 with self._connection.transaction() as r:
                     r.set_tool(self.arm, list(self._tool_kine_params), list(self._tool_dynamic_params))
             self._wait_for_state(self.ARM_STATE_TORQ, timeout=5.0, poll_interval=0.01)
+            self._verify_impedance_feedback(2, self._cart_kd, "cartesian")
 
+        self._wait_for_valid_feedback()
         time.sleep(self.post_enable_settle)
+
+    def _wait_for_valid_feedback(self) -> None:
+        """Wait for sustained nonzero joint feedback after enabling.
+
+        Marvin firmware can transiently stream all-zero ``fb_joint_pos`` values
+        after an unclean client disconnect. Its ``in_frame_serial`` is unusable
+        for detecting this condition, so require several consecutive frames
+        with at least one joint outside the zero signature before allowing the
+        arm to finish enabling.
+        """
+        assert self._connection is not None
+        timeout = self.feedback_valid_timeout
+        deadline = time.monotonic() + timeout
+        consecutive_valid = 0
+        last_state = None
+        last_error = None
+        last_feedback = None
+
+        while True:
+            data = self._connection.subscribe()
+            i = self.arm_index
+            state = data["states"][i]
+            feedback_deg = np.asarray(data["outputs"][i]["fb_joint_pos"], dtype=float)
+            last_state = int(state["cur_state"])
+            last_error = int(state["err_code"])
+            last_feedback = feedback_deg
+
+            if np.max(np.abs(feedback_deg)) > self.feedback_valid_tol_deg:
+                consecutive_valid += 1
+                if consecutive_valid >= self.feedback_valid_frames:
+                    return
+            else:
+                consecutive_valid = 0
+
+            if time.monotonic() >= deadline:
+                raise TianjiArmHardwareError(
+                    self.arm,
+                    cur_state=last_state,
+                    error_code=last_error,
+                    message=(
+                        f"Tianji arm {self.arm!r} timed out waiting for valid joint feedback "
+                        f"(all-zeros frames) within {timeout}s; last observed "
+                        f"fb_joint_pos={last_feedback.tolist()}. This usually means a stale "
+                        "controller stream after an unclean disconnect; try a clean reconnect "
+                        "or controller power-cycle."
+                    ),
+                )
+            time.sleep(0.03)
+
+    def _verify_impedance_feedback(
+        self,
+        impedance_type: int,
+        kd: Tuple[List[float], List[float]],
+        kind: str,
+        timeout: float = 1.5,
+        poll_interval: float = 0.03,
+    ) -> None:
+        """Confirm an impedance setup from controller-reported values.
+
+        Current Marvin firmware keeps ``m_InFrameSerial`` fixed at zero, so it
+        cannot establish feedback freshness. Instead, poll until all commanded
+        values match after :meth:`_wait_for_state` has reached torque mode. A
+        frozen buffer can only satisfy this complete-value check if the
+        configuration was already applied, which is itself successful.
+        """
+        assert self._connection is not None
+        deadline = time.monotonic() + timeout
+        last_observed = None
+        expected_k = np.asarray(kd[0], dtype=float)
+        expected_d = np.asarray(kd[1], dtype=float)
+        while True:
+            data = self._connection.subscribe()
+            i = self.arm_index
+            state = data["states"][i]
+            inputs = data["inputs"][i]
+            cur_state = int(state["cur_state"])
+            err_code = int(state["err_code"])
+            if kind == "joint":
+                actual_k = np.asarray(inputs["joint_k"], dtype=float)
+                actual_d = np.asarray(inputs["joint_d"], dtype=float)
+            else:
+                actual_k = np.asarray([*inputs["cart_k"], inputs["cart_kn"]], dtype=float)
+                actual_d = np.asarray([*inputs["cart_d"], inputs["cart_dn"]], dtype=float)
+            actual_impedance_type = int(inputs["imp_type"])
+            last_observed = (cur_state, err_code, actual_impedance_type, actual_k, actual_d)
+            gains_match = (
+                actual_k.shape == expected_k.shape
+                and actual_d.shape == expected_d.shape
+                # The vendored subscribe wrapper rounds RT_IN values to 4 decimals.
+                and np.allclose(actual_k, expected_k, rtol=0.0, atol=1e-4)
+                and np.allclose(actual_d, expected_d, rtol=0.0, atol=1e-4)
+            )
+            if (
+                cur_state == self.ARM_STATE_TORQ
+                and err_code == 0
+                and actual_impedance_type == impedance_type
+                and gains_match
+            ):
+                return
+            if time.monotonic() >= deadline:
+                assert last_observed is not None
+                last_state, last_error, last_imp_type, last_k, last_d = last_observed
+                raise TianjiArmHardwareError(
+                    self.arm,
+                    cur_state=last_state,
+                    error_code=last_error,
+                    message=(
+                        f"Tianji arm {self.arm!r} {kind} impedance verification failed "
+                        f"within {timeout}s: expected state={self.ARM_STATE_TORQ}, "
+                        f"err_code=0, imp_type={impedance_type}, K={expected_k.tolist()}, "
+                        f"D={expected_d.tolist()}; last observed state={last_state}, "
+                        f"err_code={last_error}, imp_type={last_imp_type}, "
+                        f"K={last_k.tolist()}, D={last_d.tolist()}."
+                    ),
+                )
+            time.sleep(poll_interval)
 
     def _wait_for_state(self, target_state: int, timeout: float = 5.0, poll_interval: float = 0.01) -> None:
         import time
@@ -667,7 +815,7 @@ class TianjiArmActor(WorldNode[
         if self._connection is None:
             return
         if enabled:
-            self._enable_arm()
+            self._enable_arm_with_idle_on_failure()
         else:
             with self._connection.transaction() as r:
                 r.set_state(self.arm, self.ARM_STATE_IDLE)
