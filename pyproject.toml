@@ -8,7 +8,7 @@ dependencies = [
     "mujoco",
     "mink",
     "osqp",
-    "xbarray>=0.0.1a19",  # numpy matrix_to_euler_angles fix required (working tree until a19 released)
+    "xbarray",
 ]
 
 [project.optional-dependencies]

@@ -1,4 +1,3 @@
-import os
 import time
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -21,7 +20,6 @@ REST_JOINT_POSITIONS = {
     "A": np.array([0.2, -0.963, 0.0, -0.85, 0.356, 0.0, 0.0], dtype=np.float32),
     "B": np.array([-0.2, -0.963, 0.0, -0.85, -0.356, 0.0, 0.0], dtype=np.float32),
 }
-from .sdk.SDK_PYTHON import fx_kine
 
 
 class TianjiArmActor(WorldNode[
@@ -65,7 +63,6 @@ class TianjiArmActor(WorldNode[
         acc_ratio: int = 6,
         joint_limit_low_deg: Optional[np.ndarray] = None,
         joint_limit_high_deg: Optional[np.ndarray] = None,
-        kine_config_path: Optional[str] = None,
         connect: bool = True,
         connection: Optional[TianjiConnection] = None,
         post_enable_settle: float = 1.0,
@@ -183,13 +180,6 @@ class TianjiArmActor(WorldNode[
                 )
             self._connection = connection
 
-        # Optional forward-kinematics support.
-        self._kine = None
-        self._kine_cfg = None
-        self._kine_config_path = kine_config_path
-        if kine_config_path is not None:
-            self._init_kine(kine_config_path)
-
         # Observation / action spaces.
         obs_spaces: Dict[str, BoxSpace] = {
             "joint_positions": BoxSpace(  # radians, within joint limits
@@ -243,14 +233,6 @@ class TianjiArmActor(WorldNode[
                 NumpyComputeBackend,
                 low=-200.0, high=200.0,
                 dtype=np.float32, shape=(6,),
-            )
-        if self._kine is not None:
-            obs_spaces["tcp_pose"] = BoxSpace(  # 4x4 FK pose matrix
-                NumpyComputeBackend,
-                low=-1.0e9,
-                high=1.0e9,
-                dtype=np.float32,
-                shape=(4, 4),
             )
         self.observation_space = DictSpace(NumpyComputeBackend, obs_spaces)
         self.action_space = BoxSpace(
@@ -625,21 +607,7 @@ class TianjiArmActor(WorldNode[
             obs["joint_external_force_estimates"] = fb["joint_external_force_estimates"].astype(np.float32)
             obs["cartesian_force_estimate"] = fb["cartesian_force_estimate"].astype(np.float32)
 
-        if self._kine is not None:
-            obs["tcp_pose"] = self._compute_tcp_pose(fb["joint_positions"]).astype(np.float32)
-
         return obs
-
-    def _compute_tcp_pose(self, joint_pos_rad: np.ndarray) -> np.ndarray:
-        """Forward kinematics from current joint positions (radians -> 4x4 pose)."""
-        if self._kine is None:
-            return np.eye(4, dtype=np.float32)
-        joints_deg = np.rad2deg(joint_pos_rad).tolist()
-        pose = self._kine.fk(joints_deg)
-        if pose is False or pose is None:
-            # FK failed; return identity so the observation stays in-space.
-            return np.eye(4, dtype=np.float32)
-        return np.asarray(pose, dtype=np.float32)
 
     # ========== Public Helper Methods ==========
     def read_joint_positions(self) -> np.ndarray:
@@ -712,83 +680,6 @@ class TianjiArmActor(WorldNode[
         with self._connection.transaction() as r:
             r.set_joint_cmd_pose(self.arm, joints_deg)
 
-    def send_eef_command(self, pose_4x4: np.ndarray) -> None:
-        """
-        Send an end-effector (TCP) pose command by solving IK and issuing the
-        resulting joint targets via :meth:`send_joint_command`.
-
-        The SDK has no streaming cartesian command, so EEF control is
-        implemented as IK -> joint targets. The IK is seeded with the current
-        joint positions (read from feedback, in degrees as the SDK expects) so
-        the solver returns a configuration close to the current one and avoids
-        branch jumps. Works in every control mode (the resulting joint targets
-        are followed rigidly in position mode, or compliantly in impedance
-        modes).
-
-        Parameters
-        ----------
-        pose_4x4:
-            Target 4x4 homogeneous TCP pose (row-major), expressed in the
-            arm's SDK base frame: **x forward, y left, z up, millimeters**
-            (verified on hardware: at the rest pose the left arm's TCP sits
-            at [559.5, +113.4, 252.8] mm, the right arm's mirrored at
-            [559.5, -113.4, 252.8] mm). The pose is the TCP/flange pose *in*
-            base coordinates, not relative to the flange.
-
-        Raises
-        ------
-        ValueError
-            If ``pose_4x4`` is not shape (4, 4).
-        RuntimeError
-            If no kinematics helper is configured (pass
-            ``kine_config_path="default"`` to the constructor), or if IK
-            fails (target unreachable / singular). On IK failure no command is
-            sent.
-        """
-        pose_4x4 = np.asarray(pose_4x4, dtype=np.float64)
-        if pose_4x4.shape != (4, 4):
-            raise ValueError(f"Expected pose shape (4, 4), got {pose_4x4.shape}")
-        if self._connection is None:
-            # Offline: consistent with send_joint_command being a no-op.
-            return
-        if self._kine is None:
-            raise RuntimeError(
-                "send_eef_command requires a kinematics helper; construct the "
-                "actor with kine_config_path='default' (or a custom .MvKDCfg path)."
-            )
-
-        # Seed IK with the current joint configuration (radians -> degrees).
-        joint_pos_rad = self._read_feedback()["joint_positions"]
-        seed_deg = np.rad2deg(joint_pos_rad).astype(np.float64).tolist()
-
-        sp = fx_kine.FX_InvKineSolvePara()
-        sp.set_input_ik_target_tcp(pose_4x4.flatten().tolist())
-        sp.set_input_ik_ref_joint(seed_deg)
-        sp.set_input_ik_zsp_type(0)  # minimize Euclidean distance to seed
-        result = self._kine.ik(sp)
-        if result is False or result is None:
-            raise RuntimeError(
-                f"Tianji arm {self.arm!r}: IK failed for the requested TCP pose "
-                "(target unreachable or singular); no command was sent."
-            )
-        target_joints_deg = result.m_Output_RetJoint.to_list()
-        target_joints_rad = np.deg2rad(np.asarray(target_joints_deg, dtype=np.float32))
-        self.send_joint_command(target_joints_rad)
-
-    def read_tcp_pose(self) -> np.ndarray:
-        """Current TCP pose as a 4x4 matrix (forward kinematics of current joints).
-
-        Expressed in the arm's SDK base frame: x forward, y left, z up,
-        millimeters. Returns the identity when offline (no connection) or
-        when no kinematics helper is configured.
-        """
-        if self._connection is None:
-            # Offline: no feedback to read and no FK source, mirror
-            # _compute_tcp_pose's no-kine fallback to a 4x4 identity.
-            return np.eye(4, dtype=np.float32)
-        joint_pos = self.read_joint_positions()
-        return self._compute_tcp_pose(joint_pos)
-
     def get_arm_state(self) -> Tuple[int, int]:
         """Return (cur_state, err_code) for this arm."""
         if self._connection is None:
@@ -819,26 +710,3 @@ class TianjiArmActor(WorldNode[
         else:
             with self._connection.transaction() as r:
                 r.set_state(self.arm, self.ARM_STATE_IDLE)
-
-    # ========== Kinematics ==========
-    def _init_kine(self, kine_config_path: str) -> None:
-        """Lazily initialize the Marvin_Kine forward-kinematics helper."""
-        if kine_config_path == "default":
-            kine_config_path = os.path.join(
-                os.path.dirname(__file__), "sdk", "ccs_m6_40.MvKDCfg"
-            )
-        if not os.path.exists(kine_config_path):
-            raise FileNotFoundError(f"kine_config_path not found: {kine_config_path}")
-        self._kine = fx_kine.Marvin_Kine()
-        cfg = self._kine.load_config(arm_type=self.arm_index, config_path=kine_config_path)
-        if cfg is None:
-            raise RuntimeError(f"Failed to load Tianji kinematics config from {kine_config_path}")
-        self._kine_cfg = cfg
-        ok = self._kine.initial_kine(
-            robot_type=cfg["TYPE"][self.arm_index],
-            dh=cfg["DH"][self.arm_index],
-            pnva=cfg["PNVA"][self.arm_index],
-            j67=cfg["BD"][self.arm_index],
-        )
-        if not ok:
-            raise RuntimeError("Failed to initialize Tianji kinematics parameters.")

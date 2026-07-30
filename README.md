@@ -21,27 +21,23 @@ The Tianji/Marvin dual-arm robot is controlled over Ethernet through a dedicated
 
 1. **Network.** Connect the controller to your host machine (directly or via a switch) and configure your host's IPv4 address to be on the same subnet as the controller, e.g. `192.168.1.x`. Verify reachability with `ping 192.168.1.190` (the default controller IP).
 
-2. **Native SDK binaries (NOT included).** The Python SDK in `unienv_tianji/sdk/SDK_PYTHON/` (`fx_robot.py`, `fx_kine.py`) loads native shared libraries via `ctypes`, resolving them **relative to the vendored file location** (i.e. inside `unienv_tianji/sdk/SDK_PYTHON/`):
-   - `libMarvinSDK.so` (Linux) / `libMarvinSDK.dll` (Windows) — required for any robot communication (the `Marvin_Robot`/`DCSS` link).
-   - `libKine.so` (Linux) / `libKine.dll` (Windows) — only required for the **legacy** vendor kinematics path (`kine_config_path`, `TianjiArmActor.send_eef_command`/`read_tcp_pose`, and the optional `tcp_pose` observation).
+2. **Native SDK binary (NOT included).** The Python communication binding in `unienv_tianji/sdk/SDK_PYTHON/fx_robot.py` loads its native shared library via `ctypes`, resolving it **relative to the vendored file location** (i.e. inside `unienv_tianji/sdk/SDK_PYTHON/`):
+    - `libMarvinSDK.so` (Linux) / `libMarvinSDK.dll` (Windows) — required for any robot communication (the `Marvin_Robot`/`DCSS` link).
 
-   These vendor binaries are **NOT shipped with this package** (they are
+    This vendor binary is **NOT shipped with this package** (it is a
    git-ignored build artifacts). You can either download prebuilt ones from the
    official [TJ_FX_ROBOT_CONTRL_SDK](https://github.com/cynthia-you/TJ_FX_ROBOT_CONTRL_SDK)
    repository (`SDK_PYTHON/`), or **build them from the vendored C++ sources** —
-   each SDK directory ships a `makefile` for Linux (and `makefile_dll` /
+    the control SDK directory ships a `makefile` for Linux (and `makefile_dll` /
    upstream `marvinSDK_ubuntu.sh` / `marvinSDK_windows.bat` for Windows):
 
    ```bash
    # libMarvinSDK.so (control/communication library)
    cd unienv_tianji/sdk/contrlSDK && make
 
-   # libKine.so (legacy vendor IK/FK library)
-   cd ../kinematicsSDK && make
-
-   # install next to the ctypes bindings
-   cp ../contrlSDK/libMarvinSDK.so libKine.so ../SDK_PYTHON/
-   ```
+    # install next to the ctypes bindings
+    cp ../contrlSDK/libMarvinSDK.so ../SDK_PYTHON/
+    ```
 
    The makefiles only need `g++` and standard Linux libs (`-lpthread -lrt`):
    they run `g++ *.cpp -Wall -w -O2 -fPIC -shared ...` (with `-DCMPL_LIN` for
@@ -49,12 +45,9 @@ The Tianji/Marvin dual-arm robot is controlled over Ethernet through a dedicated
 
    ```
    <site-packages>/unienv_tianji/sdk/SDK_PYTHON/libMarvinSDK.so
-   <site-packages>/unienv_tianji/sdk/SDK_PYTHON/libKine.so
-   ```
+    ```
 
-   **Offline mode (`connect=False`) and the mink-based `TianjiArmEefActor` IK work without any native binaries** — `TianjiArmEefActor` resolves IK against a self-contained kinematics-only MJCF (shipped under `unienv_tianji/assets/`), so it does not need `libKine`; `libKine` is only needed for the legacy `send_eef_command`/`read_tcp_pose` path on `TianjiArmActor`. Without `libMarvinSDK.so` present, instantiate the actor with `connect=False` (see below) — all hardware reads return zeros and command sends become no-ops, which is useful for testing the integration without hardware.
-
-3. **Kinematics config (optional).** A default `ccs_m6_40.MvKDCfg` config (for the M6-S-R-CCS-696) ships inside `unienv_tianji/sdk/`. Pass `kine_config_path="default"` to use it, or supply your own `.MvKDCfg` path.
+    Without `libMarvinSDK.so` present, instantiate the actor with `connect=False` (see below) — all hardware reads return zeros and command sends become no-ops, which is useful for testing the integration without hardware. `TianjiArmEefActor` resolves IK against a self-contained kinematics-only MJCF shipped under `unienv_tianji/assets/`.
 
 ## Usage
 
@@ -89,7 +82,6 @@ actor_a = TianjiArmActor(
     control_timestep=0.04,
     update_timestep=0.04,
     connection=connection,
-    # kine_config_path="default",  # uncomment to add a "tcp_pose" (4x4) FK observation
 )
 
 # A second actor sharing the same connection:
@@ -153,7 +145,6 @@ instead (see below).
 | `joint_friction_estimates`        | (7,)   | N·m             | `m_EST_Joint_Firc`                   |
 | `joint_external_force_estimates`  | (7,)   | N·m             | `m_EST_Joint_Force`                  |
 | `cartesian_force_estimate`        | (6,)   | N / N·m         | `m_EST_Cart_FN` (6D end-effector force estimate) |
-| `tcp_pose` (optional, `kine_config_path`) | (4,4) | homogeneous matrix | FK of current joints in the SDK base frame (mm) |
 
 All extended channels are read from the **same** feedback frame as the basic
 trio — there are **no extra blocking/vendor calls per step**. Set
@@ -369,42 +360,11 @@ calls `set_tool` with:
 
 Set `set_tool_payload=False` to skip the `set_tool` call entirely.
 
-### End-effector (TCP) position control
-
-The SDK has **no streaming cartesian command**; EEF control is implemented as
-IK → joint targets. Enable kinematics with `kine_config_path="default"` and use
-`send_eef_command(pose_4x4)`, which seeds IK with the current joint
-configuration (to avoid branch jumps), raises `RuntimeError` on IK failure
-(unreachable / singular — no command is sent in that case), and otherwise
-dispatches through `send_joint_command`. This works in every control mode.
-
-```python
-connection = TianjiConnection("192.168.1.190")
-actor = TianjiArmActor(
-    world,
-    arm="A",
-    connection=connection,
-    control_mode="cart_impedance",
-    kine_config_path="default",  # required for send_eef_command / tcp_pose obs
-)
-
-# Command a 4x4 homogeneous TCP pose, expressed in the arm's SDK base frame
-# (x forward, y left, z up; translations in MILLIMETERS).
-target_pose = np.eye(4, dtype=np.float64)
-target_pose[0, 3] = 300.0  # x = 300 mm forward
-target_pose[2, 3] = 450.0  # z = 450 mm up
-actor.send_eef_command(target_pose)
-
-# Read the current TCP pose (forward kinematics of current joints).
-current_pose = actor.read_tcp_pose()  # (4, 4) ndarray
-```
-
 ## License
 
 This repository is MIT licensed (see [LICENSE](LICENSE)).
 
-The files under `unienv_tianji/sdk/` (`fx_robot.py`, `fx_kine.py`, and the
-`libMarvinSDK.*` / `libKine.*` prebuilt binaries) are vendored from the official
+The files under `unienv_tianji/sdk/` are vendored from the official
 [TJ_FX_ROBOT_CONTRL_SDK](https://github.com/cynthia-you/TJ_FX_ROBOT_CONTRL_SDK)
 repository and remain Apache-2.0 licensed, Copyright 2025 上海孚晞科技有限公司 —
 see [`unienv_tianji/sdk/LICENSE`](unienv_tianji/sdk/LICENSE) and the per-file

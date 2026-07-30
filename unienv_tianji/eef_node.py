@@ -38,18 +38,13 @@ from .errors import TianjiArmHardwareError
 # Action rotation parsing (euler/quat/rot6d) and the EEF quaternion observation
 # use XBArray's numpy-backend rotation conversions directly (called at the use
 # sites, no pass-through wrappers): ``euler_angles_to_matrix(angles, convention)``,
-# ``matrix_to_euler_angles(matrix, convention)``, ``quaternion_to_matrix``,
-# ``matrix_to_quaternion``, ``rotation_6d_to_matrix``, ``matrix_to_rotation_6d``.
+# ``quaternion_to_matrix``, ``matrix_to_quaternion``, ``rotation_6d_to_matrix``.
 # XBArray is the single source of truth for rotation math shared with the sim
 # stack, so the real adaptor and the sim cannot drift. Quaternions are
 # ``(w, x, y, z)`` (wxyz) both in XBArray and here.
 #
 # Semantics (verified against the sim):
-#   - euler: ``euler_angles_to_matrix(a, "XYZ")`` == R = Rx@Ry@Rz; the inverse
-#     ``matrix_to_euler_angles(R, "XYZ")`` round-trips (including gimbal cases)
-#     and is used directly (requires XBArray >= 0.0.1a19, where the numpy
-#     backend's ``matrix_to_euler_angles`` was fixed to not call the array-api
-#     ``.size()`` method on raw numpy arrays).
+#   - euler: ``euler_angles_to_matrix(a, "XYZ")`` == R = Rx@Ry@Rz.
 #   - rot6d: XBArray row convention (first two rows of R -> 6d; 6d -> b1,b2,b3
 #     stacked as rows along axis=-2).
 #
@@ -59,56 +54,17 @@ from .errors import TianjiArmHardwareError
 
 from xbarray.transformations.rotation_conversions.numpy import (
     euler_angles_to_matrix,
-    matrix_to_euler_angles,
     matrix_to_quaternion,
     quaternion_to_matrix,
     rotation_6d_to_matrix,
-    matrix_to_rotation_6d,
 )
 
 RotationRepr = Literal["euler", "quat", "rot6d"]
 _EULER_CONVENTION = "XYZ"
 
 
-def rotation_to_quaternion(
-    representation: RotationRepr, rotation: np.ndarray
-) -> np.ndarray:
-    """Convert a rotation in the given representation to a quaternion (wxyz)."""
-    if representation == "euler":
-        return matrix_to_quaternion(euler_angles_to_matrix(rotation, _EULER_CONVENTION))
-    elif representation == "quat":
-        return np.asarray(rotation, dtype=np.float64)
-    elif representation == "rot6d":
-        return matrix_to_quaternion(rotation_6d_to_matrix(rotation))
-    raise ValueError(f"Unsupported rotation representation: {representation!r}")
-
-
-def quaternion_to_rotation(
-    representation: RotationRepr, quaternion: np.ndarray
-) -> np.ndarray:
-    """Convert a quaternion (wxyz) to the given rotation representation."""
-    if representation == "euler":
-        return matrix_to_euler_angles(
-            quaternion_to_matrix(quaternion), _EULER_CONVENTION
-        )
-    elif representation == "quat":
-        return np.asarray(quaternion, dtype=np.float64)
-    elif representation == "rot6d":
-        return matrix_to_rotation_6d(quaternion_to_matrix(quaternion))
-    raise ValueError(f"Unsupported rotation representation: {representation!r}")
-
-
-def normalize_rotation_action(representation: RotationRepr, action: np.ndarray) -> np.ndarray:
-    """Normalize a rotation action per the sim convention (only euler changes)."""
-    action = np.asarray(action, dtype=np.float64)
-    if representation == "euler":
-        action = (action + np.pi) % (2 * np.pi) - np.pi  # wrap to [-pi, pi]
-        action = action / np.pi  # to [-1, 1]
-    return action
-
-
 def unnormalize_rotation_action(representation: RotationRepr, action: np.ndarray) -> np.ndarray:
-    """Inverse of :func:`normalize_rotation_action`."""
+    """Undo the actor's rotation-action normalization."""
     action = np.asarray(action, dtype=np.float64)
     if representation == "euler":
         action = action * np.pi  # [-1, 1] -> [-pi, pi]
