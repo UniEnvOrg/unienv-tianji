@@ -3,7 +3,7 @@ name = "unienv_tianji"
 version = "0.0.1a1"
 requires-python = ">= 3.10"
 dependencies = [
-    "unienv",
+    "unienv>=0.0.1b16",
     "numpy",
     "mujoco",
     "mink",

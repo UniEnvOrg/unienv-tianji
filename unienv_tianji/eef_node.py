@@ -28,8 +28,9 @@ from unienv_interface.backends.numpy import (
     NumpyRNGType,
 )
 from unienv_interface.space import DictSpace, BoxSpace
+from unienv_interface.space.space_utils.metadata_utils import action_metadata, proprio_metadata
 
-from .tianji_arm import TianjiArmActor, REST_JOINT_POSITIONS
+from .tianji_arm import TianjiArmActor, REST_JOINT_POSITIONS, control_rate_hz
 from .errors import TianjiArmHardwareError
 
 # --------------------------------------------------------------------------- #
@@ -76,6 +77,37 @@ def unnormalize_rotation_action(representation: RotationRepr, action: np.ndarray
 
 def rot_dim(representation: RotationRepr) -> int:
     return {"euler": 3, "quat": 4, "rot6d": 6}[representation]
+
+
+# Space-metadata description of each rotation representation: the vocabulary
+# ``rotation`` value (transforms3d axes: ``"euler_rxyz"`` is intrinsic XYZ,
+# i.e. R = Rx @ Ry @ Rz), element names and units.
+_ROTATION_METADATA = {
+    "euler": ("euler_rxyz", ["rx", "ry", "rz"], "rad"),
+    "quat": ("quat_wxyz", ["qw", "qx", "qy", "qz"], "normalized"),
+    "rot6d": ("rot6d", [f"rot6d_{i}" for i in range(6)], "normalized"),
+}
+
+
+def eef_pose_action_metadata(
+    representation: RotationRepr, normalize_rotation_action: bool = False,
+) -> Dict[str, Any]:
+    """Space metadata of the absolute EEF pose action (position + rotation, robot base frame).
+
+    With ``normalize_rotation_action`` the Euler angles are given divided by
+    pi (``[-1, 1]``), so their units become ``"normalized"``.
+    """
+    rotation, rot_names, rot_unit = _ROTATION_METADATA[representation]
+    if normalize_rotation_action and representation == "euler":
+        rot_unit = "normalized"
+    return action_metadata(
+        control="eef_pose",
+        mode="absolute",
+        frame="base",
+        rotation=rotation,
+        names=["x", "y", "z", *rot_names],
+        units=["m", "m", "m", *([rot_unit] * len(rot_names))],
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -268,38 +300,58 @@ class TianjiArmEefActor(WorldNode[
         self._last_ik_error = np.zeros(6, dtype=np.float32)
         self._next_action: Optional[NumpyArrayType] = None
 
-        # Build spaces.
+        # Build spaces. Every leaf carries space metadata (units, names,
+        # frame / rotation representation, source node and sampling rate).
         n = self.n_joints
+        names = list(self.arm_actor.joint_names)
+        described = dict(source=name or None, fps=control_rate_hz(control_timestep))
         obs_spaces: Dict[str, BoxSpace] = {
             "joint_position": BoxSpace(
                 NumpyComputeBackend,
                 low=-np.inf, high=np.inf, dtype=np.float32, shape=(n,),
+                metadata=proprio_metadata(units="rad", names=names, **described),
             ),
             "joint_velocity": BoxSpace(
                 NumpyComputeBackend,
                 low=-np.inf, high=np.inf, dtype=np.float32, shape=(n,),
+                metadata=proprio_metadata(units="rad/s", names=names, **described),
             ),
             "joint_torque": BoxSpace(
                 NumpyComputeBackend,
                 low=-np.inf, high=np.inf, dtype=np.float32, shape=(n,),
+                metadata=proprio_metadata(units="N*m", names=names, **described),
             ),
             "eef_position": BoxSpace(
                 NumpyComputeBackend,
                 low=-np.inf, high=np.inf, dtype=np.float32, shape=(3,),
+                metadata=proprio_metadata(
+                    units="m", names=["x", "y", "z"], frame="base", **described,
+                ),
             ),
             "eef_quaternion": BoxSpace(
                 NumpyComputeBackend,
                 low=-1.0, high=1.0, dtype=np.float32, shape=(4,),
+                metadata=proprio_metadata(
+                    names=["qw", "qx", "qy", "qz"], frame="base", rotation="quat_wxyz", **described,
+                ),
             ),
             "last_ik_solved_error": BoxSpace(
                 NumpyComputeBackend,
                 low=-np.inf, high=np.inf, dtype=np.float32, shape=(6,),
+                metadata=proprio_metadata(
+                    units=["m", "m", "m", "rad", "rad", "rad"],
+                    names=["pos_x", "pos_y", "pos_z", "rot_x", "rot_y", "rot_z"],
+                    rotation="axis_angle",
+                    label="last IK residual: position error and rotation error vector",
+                    **described,
+                ),
             ),
         }
         # Pass-through of the child (TianjiArmActor) extended-proprioception
         # channels, when the child exposes them. These keep the child's plural
         # adaptor names (downstream maps them); the EEF node's own
-        # joint_position/velocity/torque stay singular.
+        # joint_position/velocity/torque stay singular. Their metadata is the
+        # child's, re-attributed to this node.
         if getattr(self.arm_actor, "read_extended_proprioception", False):
             child_spaces = self.arm_actor.observation_space.spaces
             for k in (
@@ -310,7 +362,7 @@ class TianjiArmEefActor(WorldNode[
                 "cartesian_force_estimate",
             ):
                 if k in child_spaces:
-                    obs_spaces[k] = child_spaces[k]
+                    obs_spaces[k] = child_spaces[k].with_metadata(**described)
         self.observation_space = DictSpace(NumpyComputeBackend, obs_spaces)
 
         rdim = rot_dim(rotation_representation)
@@ -318,6 +370,9 @@ class TianjiArmEefActor(WorldNode[
             self.action_space = BoxSpace(
                 NumpyComputeBackend,
                 low=-np.inf, high=np.inf, dtype=np.float32, shape=(3 + rdim,),
+                metadata=eef_pose_action_metadata(
+                    rotation_representation, normalize_rotation_action,
+                ),
             )
         else:
             self.action_space = BoxSpace(
@@ -325,6 +380,9 @@ class TianjiArmEefActor(WorldNode[
                 low=self.arm_actor.joint_limit_low,
                 high=self.arm_actor.joint_limit_high,
                 dtype=np.float32, shape=(n,),
+                metadata=action_metadata(
+                    control="joint_position", mode="absolute", units="rad", names=names,
+                ),
             )
 
     # ========== Backend / Device ==========

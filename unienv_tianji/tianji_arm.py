@@ -7,6 +7,7 @@ from unienv_interface.world import WorldNode, RealWorld, World
 from unienv_interface.backends import ComputeBackend, BArrayType, BDeviceType, BDtypeType, BRNGType
 from unienv_interface.backends.numpy import NumpyComputeBackend, NumpyArrayType, NumpyDeviceType, NumpyDtypeType, NumpyRNGType
 from unienv_interface.space import DictSpace, BoxSpace
+from unienv_interface.space.space_utils.metadata_utils import action_metadata, metadata, proprio_metadata
 
 from .connection import TianjiConnection
 from .errors import TianjiArmHardwareError
@@ -20,6 +21,13 @@ REST_JOINT_POSITIONS = {
     "A": np.array([0.2, -0.963, 0.0, -0.85, 0.356, 0.0, 0.0], dtype=np.float32),
     "B": np.array([-0.2, -0.963, 0.0, -0.85, -0.356, 0.0, 0.0], dtype=np.float32),
 }
+
+
+def control_rate_hz(control_timestep: Optional[float]) -> Optional[float]:
+    """Observation rate (the ``fps`` space metadata) for a control timestep in seconds."""
+    if not control_timestep:
+        return None
+    return float(round(1.0 / float(control_timestep), 6))
 
 
 class TianjiArmActor(WorldNode[
@@ -180,7 +188,10 @@ class TianjiArmActor(WorldNode[
                 )
             self._connection = connection
 
-        # Observation / action spaces.
+        # Observation / action spaces. Every leaf carries space metadata
+        # (units, joint names, source node and sampling rate).
+        names = list(self.joint_names)
+        described = dict(source=name or None, fps=control_rate_hz(control_timestep))
         obs_spaces: Dict[str, BoxSpace] = {
             "joint_positions": BoxSpace(  # radians, within joint limits
                 NumpyComputeBackend,
@@ -188,6 +199,7 @@ class TianjiArmActor(WorldNode[
                 high=self.joint_limit_high,
                 dtype=np.float32,
                 shape=(self.n_joints,),
+                metadata=proprio_metadata(units="rad", names=names, **described),
             ),
             "joint_velocities": BoxSpace(  # rad/s, generous bounds
                 NumpyComputeBackend,
@@ -195,6 +207,7 @@ class TianjiArmActor(WorldNode[
                 high=2.0 * np.pi,
                 dtype=np.float32,
                 shape=(self.n_joints,),
+                metadata=proprio_metadata(units="rad/s", names=names, **described),
             ),
             "joint_torques": BoxSpace(  # N·m, sensor torque (m_FB_Joint_SToq)
                 NumpyComputeBackend,
@@ -202,6 +215,9 @@ class TianjiArmActor(WorldNode[
                 high=100.0,
                 dtype=np.float32,
                 shape=(self.n_joints,),
+                metadata=proprio_metadata(
+                    units="N*m", names=names, label="joint-side sensor torque", **described,
+                ),
             ),
         }
         if self.read_extended_proprioception:
@@ -213,34 +229,56 @@ class TianjiArmActor(WorldNode[
                 NumpyComputeBackend,
                 low=-1000.0, high=1000.0,
                 dtype=np.float32, shape=(self.n_joints,),
+                metadata=proprio_metadata(
+                    units="permille", names=names,
+                    label="motor current, per mille of the rated current", **described,
+                ),
             )
             obs_spaces["joint_temperatures"] = BoxSpace(  # °C, drive/motor temp
                 NumpyComputeBackend,
                 low=-40.0, high=150.0,
                 dtype=np.float32, shape=(self.n_joints,),
+                metadata=proprio_metadata(units="degC", names=names, **described),
             )
             obs_spaces["joint_friction_estimates"] = BoxSpace(  # N·m, m_EST_Joint_Firc
                 NumpyComputeBackend,
                 low=-100.0, high=100.0,
                 dtype=np.float32, shape=(self.n_joints,),
+                metadata=proprio_metadata(
+                    units="N*m", names=names, label="joint friction torque estimate", **described,
+                ),
             )
             obs_spaces["joint_external_force_estimates"] = BoxSpace(  # N·m, m_EST_Joint_Force
                 NumpyComputeBackend,
                 low=-100.0, high=100.0,
                 dtype=np.float32, shape=(self.n_joints,),
+                metadata=proprio_metadata(
+                    units="N*m", names=names, label="joint external torque estimate", **described,
+                ),
             )
             obs_spaces["cartesian_force_estimate"] = BoxSpace(  # N/N·m, m_EST_Cart_FN (6D)
                 NumpyComputeBackend,
                 low=-200.0, high=200.0,
                 dtype=np.float32, shape=(6,),
+                metadata=metadata(
+                    "force",
+                    units=["N", "N", "N", "N*m", "N*m", "N*m"],
+                    names=["fx", "fy", "fz", "tx", "ty", "tz"],
+                    label="end-effector external wrench estimate",
+                    **described,
+                ),
             )
         self.observation_space = DictSpace(NumpyComputeBackend, obs_spaces)
+        # Every control mode commands absolute joint positions (set_joint_cmd_pose).
         self.action_space = BoxSpace(
             NumpyComputeBackend,
             low=self.joint_limit_low,
             high=self.joint_limit_high,
             dtype=np.float32,
             shape=(self.n_joints,),
+            metadata=action_metadata(
+                control="joint_position", mode="absolute", units="rad", names=names,
+            ),
         )
 
         self._current_observation: Optional[Dict[str, NumpyArrayType]] = None

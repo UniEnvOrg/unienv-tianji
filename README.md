@@ -189,6 +189,31 @@ in its observation dict alongside its own six keys
 the passthrough keys keep the child's plural adaptor names (e.g.
 `joint_currents`, `joint_temperatures`, `cartesian_force_estimate`).
 
+### Space metadata
+
+Every observation and action space carries UniEnv
+[space metadata](https://github.com/UniEnvOrg/UniEnv) (`unienv>=0.0.1b16`), so
+downstream code can read units, names and frames from the spaces instead of
+this README:
+
+- observation leaves: `kind="proprio"` with `units` (`"rad"`, `"rad/s"`,
+  `"N*m"`, `"degC"`, `"permille"` for `joint_currents`), `names` (the joint
+  names `joint1` … `joint7`), `source` (the node `name`) and `fps`
+  (`1 / control_timestep`, 25 by default); `cartesian_force_estimate` is
+  `kind="force"` with per-element `units` `["N", "N", "N", "N*m", "N*m", "N*m"]`
+  (its frame is not documented by the SDK, so none is given);
+- `TianjiArmEefActor` adds `eef_position` (`units="m"`, `frame="base"`),
+  `eef_quaternion` (`rotation="quat_wxyz"`, `frame="base"`) and
+  `last_ik_solved_error` (`units` `[m, m, m, rad, rad, rad]`,
+  `rotation="axis_angle"`); its pass-through channels keep the child's
+  metadata with `source` set to the EEF node;
+- actions: `kind="action"`, `mode="absolute"`; joint actions are
+  `control="joint_position"`, `units="rad"` (in every arm `control_mode`); EEF
+  actions are `control="eef_pose"`, `frame="base"` with `rotation`
+  `"euler_rxyz"` (intrinsic XYZ, `R = Rx @ Ry @ Rz`), `"quat_wxyz"` or
+  `"rot6d"` and per-element `names` / `units` (the Euler part is
+  `"normalized"` with `normalize_rotation_action=True`).
+
 ## End-effector pose control — `TianjiArmEefActor`
 
 `TianjiArmEefActor` wraps one :class:`TianjiArmActor` and exposes an absolute
