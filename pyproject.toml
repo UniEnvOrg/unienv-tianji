@@ -1,6 +1,8 @@
 [project]
 name = "unienv_tianji"
 version = "0.0.1a1"
+readme = "README.md"
+license = "MIT"
 requires-python = ">= 3.10"
 dependencies = [
     "unienv>=0.0.1b16",
@@ -23,7 +25,7 @@ Changelog = "https://github.com/UniEnvOrg/unienv-tianji/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 include = ["*"]
-exclude = ["training*", "tests*"]
+exclude = ["training*", "tests*", "scripts*"]
 
 [tool.setuptools.package-data]
 "unienv_tianji" = [
