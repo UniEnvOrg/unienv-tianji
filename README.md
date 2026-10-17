@@ -387,7 +387,7 @@ Set `set_tool_payload=False` to skip the `set_tool` call entirely.
 
 ## License
 
-This repository is MIT licensed (see [LICENSE](LICENSE)).
+This repository is licensed under the Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)).
 
 The files under `unienv_tianji/sdk/` are vendored from the official
 [TJ_FX_ROBOT_CONTRL_SDK](https://github.com/cynthia-you/TJ_FX_ROBOT_CONTRL_SDK)

@@ -2,7 +2,7 @@
 name = "unienv_tianji"
 version = "0.0.1a1"
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">= 3.10"
 dependencies = [
     "unienv>=0.0.1b16",
