@@ -13,7 +13,7 @@ from .connection import TianjiConnection
 from .errors import TianjiArmHardwareError
 
 # Rest (home) joint positions in radians, based on the MJCF "home" keyframe
-# in UniEnvOrg/genesis_adaptor (unienv_genesis_collection/robots/
+# in UniEnvOrg/unienv-genesis (unienv_genesis_collection/robots/
 # tianji_marvin_wuji.py: _ARM_HOME_LEFT / _ARM_HOME_RIGHT), with the left-arm
 # j5 sign flipped (+0.356, matching the real left arm's convention).
 # SDK arm "A" is the left arm and arm "B" the right arm. All fingers open.

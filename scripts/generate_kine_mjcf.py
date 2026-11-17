@@ -2,7 +2,7 @@
 """Generate kinematics-only per-arm MJCFs from the dual-arm source MJCF.
 
 The source model at
-``genesis_adaptor/unienv_genesis_collection/assets/robots/tianji_marvin_ccs_696/tianji_marvin_CCS_real_limit_wuji.xml``
+``unienv-genesis/unienv_genesis_collection/assets/robots/tianji_marvin_ccs_696/tianji_marvin_CCS_real_limit_wuji.xml``
 describes the full Tianji/Marvin dual-arm robot with Wuji hands (meshes,
 geoms, finger joints, actuators, sensors, contacts). For pure kinematics +
 mink-based IK we only need one 7-DoF arm chain per file, welded to a palm
@@ -219,7 +219,7 @@ def build_arm_xml(arm: str, source_root: ET.Element) -> ET.Element:
 def main(argv: list[str]) -> int:
     repo = Path(__file__).resolve().parent.parent
     default_source = repo.parent / (
-        "genesis_adaptor/unienv_genesis_collection/assets/robots/"
+        "unienv-genesis/unienv_genesis_collection/assets/robots/"
         "tianji_marvin_ccs_696/tianji_marvin_CCS_real_limit_wuji.xml"
     )
     source_xml = Path(argv[1] if len(argv) > 1 else default_source)

@@ -331,7 +331,7 @@ retargeting node before actions reach `TianjiArmEefActor`.
 The kinematics-only per-arm MJCFs ship under `unienv_tianji/assets/`
 (`tianji_marvin_left_arm_kine.xml`, `tianji_marvin_right_arm_kine.xml`). They
 are derived from the full dual-arm + Wuji-hand source MJCF in
-`genesis_adaptor/unienv_genesis_collection/.../tianji_marvin_CCS_real_limit_wuji.xml`
+`unienv-genesis/unienv_genesis_collection/.../tianji_marvin_CCS_real_limit_wuji.xml`
 by `scripts/generate_kine_mjcf.py`: each file keeps one 7-DoF arm chain (joints,
 inertials, defaults, ranges), drops the other arm, all meshes/geoms/materials,
 finger joints, actuators, sensors and contacts, welds the palm body to Link7,
