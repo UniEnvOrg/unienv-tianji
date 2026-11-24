@@ -87,7 +87,13 @@ def test_eef_node_spaces_are_described(representation, normalize, rotation, rot_
     assert obs["eef_position"].metadata["units"] == "m"
     assert obs["eef_quaternion"].metadata["rotation"] == "quat_wxyz"
     assert obs["eef_quaternion"].metadata["frame"] == "base"
-    assert tuple(obs["last_ik_solved_error"].metadata["units"]) == ("m",) * 3 + ("rad",) * 3
+    ik_error = obs["last_ik_solved_error"].metadata
+    assert tuple(ik_error["units"]) == ("m",) * 3 + ("rad",) * 3
+    assert (ik_error["frame"], ik_error["site"], ik_error["rotation"]) == ("link_local", "palm", "axis_angle")
+    assert "inv(achieved) @ target" in ik_error["label"]
+    # The child's description of the sensor torque is kept.
+    assert obs["joint_torque"].metadata["label"] == node.arm_actor.observation_space["joint_torques"].metadata["label"]
+    assert obs["joint_torque"].metadata["label"] == "joint-side sensor torque"
     # Pass-through channels keep the child's description, attributed to this node.
     assert obs["joint_currents"].metadata["units"] == "permille"
     for space in obs.values():
@@ -101,6 +107,12 @@ def test_eef_node_spaces_are_described(representation, normalize, rotation, rot_
     assert act["rotation"] == rotation
     assert tuple(act["units"]) == ("m", "m", "m") + rot_units
     assert len(act["names"]) == node.action_space.shape[-1]
+    if representation == "rot6d":
+        assert "first two rows of R" in act["label"]
+    elif representation == "euler" and normalize:
+        assert "divided by pi" in act["label"]
+    else:
+        assert "label" not in act
 
 
 def test_eef_node_joint_action_is_described():

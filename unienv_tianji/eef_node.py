@@ -87,6 +87,9 @@ _ROTATION_METADATA = {
     "quat": ("quat_wxyz", ["qw", "qx", "qy", "qz"], "normalized"),
     "rot6d": ("rot6d", [f"rot6d_{i}" for i in range(6)], "normalized"),
 }
+# The vocabulary's ``"rot6d"`` does not fix which 6 numbers: XBArray's (the
+# pytorch3d convention) are the first two ROWS of R (``R[:2, :].reshape(6)``).
+_ROT6D_LABEL = "rot6d: first two rows of R, row-major (XBArray / pytorch3d convention)"
 
 
 def eef_pose_action_metadata(
@@ -95,11 +98,17 @@ def eef_pose_action_metadata(
     """Space metadata of the absolute EEF pose action (position + rotation, robot base frame).
 
     With ``normalize_rotation_action`` the Euler angles are given divided by
-    pi (``[-1, 1]``), so their units become ``"normalized"``.
+    pi (``[-1, 1]``), so their units become ``"normalized"`` and the ``label``
+    records the scale. For ``"rot6d"`` the ``label`` records which 6 numbers
+    (the first two rows of R).
     """
     rotation, rot_names, rot_unit = _ROTATION_METADATA[representation]
+    label = None
     if normalize_rotation_action and representation == "euler":
         rot_unit = "normalized"
+        label = "euler angles divided by pi: [-1, 1] maps to [-pi, pi] rad"
+    elif representation == "rot6d":
+        label = _ROT6D_LABEL
     return action_metadata(
         control="eef_pose",
         mode="absolute",
@@ -107,6 +116,7 @@ def eef_pose_action_metadata(
         rotation=rotation,
         names=["x", "y", "z", *rot_names],
         units=["m", "m", "m", *([rot_unit] * len(rot_names))],
+        label=label,
     )
 
 
@@ -319,7 +329,12 @@ class TianjiArmEefActor(WorldNode[
             "joint_torque": BoxSpace(
                 NumpyComputeBackend,
                 low=-np.inf, high=np.inf, dtype=np.float32, shape=(n,),
-                metadata=proprio_metadata(units="N*m", names=names, **described),
+                # Keep the child's description of its joint_torques.
+                metadata=proprio_metadata(
+                    units="N*m", names=names,
+                    label=self.arm_actor.observation_space.spaces["joint_torques"].metadata.get("label"),
+                    **described,
+                ),
             ),
             "eef_position": BoxSpace(
                 NumpyComputeBackend,
@@ -338,11 +353,19 @@ class TianjiArmEefActor(WorldNode[
             "last_ik_solved_error": BoxSpace(
                 NumpyComputeBackend,
                 low=-np.inf, high=np.inf, dtype=np.float32, shape=(6,),
+                # mink's FrameTask.compute_error: the body twist
+                # log(inv(achieved) @ target) in se(3), expressed in the
+                # controlled (palm site) frame, not the base frame.
                 metadata=proprio_metadata(
                     units=["m", "m", "m", "rad", "rad", "rad"],
                     names=["pos_x", "pos_y", "pos_z", "rot_x", "rot_y", "rot_z"],
+                    frame="link_local",
                     rotation="axis_angle",
-                    label="last IK residual: position error and rotation error vector",
+                    site=_PALM_SITE,
+                    label=(
+                        "last IK residual: SE(3) log of inv(achieved) @ target (mink FrameTask error), "
+                        "in the palm site frame; linear part (m), then rotation vector (rad)"
+                    ),
                     **described,
                 ),
             ),
@@ -455,8 +478,10 @@ class TianjiArmEefActor(WorldNode[
         Returns
         -------
         q_target : (7,) target joint positions (radians).
-        error : (6,) [pos_err(3), rot_err(3)] from the last iterate (axis-angle
-            of ``inv(achieved) @ target`` for the rotation part).
+        error : (6,) [pos_err(3), rot_err(3)] from the last iterate: mink's
+            ``FrameTask.compute_error``, the SE(3) log of ``inv(achieved) @
+            target`` (a body twist in the palm frame, not the base frame; the
+            rotation part is its axis-angle vector).
         """
         import mink
 
